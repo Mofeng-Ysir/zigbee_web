@@ -184,6 +184,7 @@ function createDeviceEntry(
 function createJoiningDevice(tick: number): JoiningDevice {
   const entry = DEVICE_CATALOG[tick % DEVICE_CATALOG.length]
   const confidence = roundTo(0.88 + (tick % 4) * 0.02, 2)
+  const decision: DeviceDecision = tick % 4 === 3 ? 'deny' : tick % 4 === 2 ? 'allow' : 'pending'
 
   return {
     ieeeAddr: entry.ieeeAddr,
@@ -194,6 +195,9 @@ function createJoiningDevice(tick: number): JoiningDevice {
     predictedLabel: entry.label,
     confidence,
     signalScore: 78 + ((tick + 1) % 5) * 4,
+    decision,
+    decisionText: decision === 'allow' ? '允许入网' : decision === 'deny' ? '拒绝入网' : '待判定',
+    reason: decision === 'deny' ? 'predicted_unknown' : decision === 'allow' ? 'recognized_known_label' : 'matching',
     iqSamples: createIqSamples(entry.seed + tick),
     fingerprint: createFingerprintBundle(entry.seed + tick, entry.label),
   }

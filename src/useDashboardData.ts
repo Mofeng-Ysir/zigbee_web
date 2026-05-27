@@ -8,71 +8,132 @@ import type {
   FingerprintBundle,
   FingerprintMatrix,
   HistoryRecord,
+  JoiningDevice,
+  OfflineDevice,
 } from './types'
 
 const LIVE_ENABLED = import.meta.env.VITE_ENABLE_LIVE !== 'false'
 const COORDINATOR_HTTP_BASE = trimTrailingSlash(
   import.meta.env.VITE_COORDINATOR_HTTP_BASE ?? 'http://127.0.0.1:8787',
 )
-const COORDINATOR_WS_URL =
-  import.meta.env.VITE_COORDINATOR_WS_URL ?? 'ws://127.0.0.1:8787/api/v1/ws'
-const INFER_WS_URL = import.meta.env.VITE_INFER_WS_URL ?? 'ws://127.0.0.1:8000/ws/infer'
+const POLL_INTERVAL_MS = clampPollInterval(
+  Number(import.meta.env.VITE_COORDINATOR_POLL_INTERVAL_MS ?? 3000),
+)
 
 interface CoordinatorStatusResponse {
   coordinator?: {
+    online?: boolean
+    host_link_ready?: boolean
     pan_id?: string
     channel?: number
+    short_addr?: string
     ieee_addr?: string
     permit_join_open?: boolean
     permit_join_remaining?: number
     network_state?: string
+    startup_factory_new?: boolean
+    last_event_type?: string
+    last_event_at?: string
     model_identifier?: string
   }
-  decision_mode?: string
-  pending_requests?: unknown[]
-  device_count?: number
+  rf_pipeline?: {
+    model_loaded?: boolean
+    unknown_policy?: string
+    last_error?: string
+  }
+  policy?: {
+    known_device_policy?: string
+  }
+  pending_counts?: {
+    access_requests?: number
+    rf_samples?: number
+  }
 }
 
 interface CoordinatorDeviceResponse {
   items?: CoordinatorDevice[]
+  count?: number
 }
 
 interface CoordinatorDevice {
   short_addr?: string
-  ieee_addr?: string
-  capability?: string
-  status?: string
-  last_seen_at?: string
-  last_decision?: string
-  parent_short?: string
+  ieee_addr?: string | null
+  capability?: string | null
+  status?: string | null
+  last_event_type?: string | null
+  last_seen_at?: string | null
+  last_decision?: string | null
+  last_decision_at?: string | null
+  parent_short?: string | null
+  update_status?: string | null
+  tc_action?: string | null
+  rejoin?: boolean | null
+  last_rf_trace_id?: string | null
+  last_match_delta_ms?: number | null
+  last_pred_label?: string | null
+  last_pred_confidence?: number | null
+  last_pred_is_unknown?: boolean | null
+  last_admission_id?: string | null
   metadata?: Record<string, unknown>
 }
 
-interface CoordinatorEventsResponse {
-  items?: CoordinatorEvent[]
+interface AdmissionPrediction {
+  label?: string
+  confidence?: number
+  is_unknown?: boolean
 }
 
-interface CoordinatorEvent {
-  id?: number
-  event_type?: string
-  timestamp?: string
-  payload?: Record<string, unknown>
+interface AdmissionTiming {
+  match_delta_ms?: number | null
+  infer_ms?: number | null
+  total_ms?: number | null
 }
 
-interface InferResultMessage {
-  type: 'infer_result'
-  pred?: {
-    label?: string
-    confidence?: number
-  }
+interface AdmissionRequestSummary {
+  seq?: number
+  short_addr?: string
+  capability?: string
+  pan_id?: string
+  channel?: number
+  model?: string
+  request_ts?: string
+  received_at?: string
+}
+
+interface AdmissionSampleSummary {
+  trace_id?: string
+  sample_ts?: string
+  received_at?: string
+}
+
+interface AdmissionsResponse {
+  items?: AdmissionSummary[]
+  count?: number
+}
+
+interface AdmissionSummary {
+  admission_id?: string
+  status?: string
+  created_at?: string
+  updated_at?: string
+  request?: AdmissionRequestSummary
+  rf_sample?: AdmissionSampleSummary | null
+  pred?: AdmissionPrediction | null
+  decision?: string | null
+  reason?: string | null
+  error?: string | null
+  timing?: AdmissionTiming | null
+}
+
+interface AdmissionDetailResponse extends AdmissionSummary {
   iq?: {
     real?: number[]
     imag?: number[]
-  }
+  } | null
   gaf?: {
     shape?: number[]
     data?: number[][][]
-  }
+  } | null
 }
 
 interface DashboardConnectionState {
@@ -105,6 +166,9 @@ export function useDashboardData() {
     }
 
     const abortController = new AbortController()
+    const admissionCache = new Map<string, AdmissionDetailResponse>()
+    const admissionCacheVersion = new Map<string, string>()
+    let disposed = false
     let refreshTimer: number | null = null
 
     const setError = (message: string) => {
@@ -114,21 +178,110 @@ export function useDashboardData() {
       }))
     }
 
+    const scheduleRefresh = () => {
+      if (disposed || refreshTimer !== null) {
+        return
+      }
+
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null
+        void refreshCoordinatorState()
+      }, POLL_INTERVAL_MS)
+    }
+
+    const pruneAdmissionCache = () => {
+      while (admissionCache.size > 24) {
+        const oldestKey = admissionCache.keys().next().value
+        if (!oldestKey) {
+          break
+        }
+        admissionCache.delete(oldestKey)
+        admissionCacheVersion.delete(oldestKey)
+      }
+    }
+
+    const loadAdmissionDetailById = async (admissionId: string, updatedAt = '') => {
+      const cachedVersion = admissionCacheVersion.get(admissionId) ?? ''
+      if (admissionCache.has(admissionId) && (!updatedAt || cachedVersion === updatedAt)) {
+        return admissionCache.get(admissionId) ?? null
+      }
+
+      try {
+        const detail = await fetchJson<AdmissionDetailResponse>(
+          `${COORDINATOR_HTTP_BASE}/api/v2/admissions/${admissionId}`,
+          abortController.signal,
+        )
+        admissionCache.set(admissionId, detail)
+        admissionCacheVersion.set(admissionId, updatedAt || detail.updated_at || cachedVersion)
+        pruneAdmissionCache()
+        return detail
+      } catch (error) {
+        if (!abortController.signal.aborted) {
+          setError(
+            error instanceof Error ? `准入详情加载失败: ${error.message}` : '准入详情加载失败',
+          )
+        }
+        return admissionCache.get(admissionId) ?? null
+      }
+    }
+
+    const warmAdmissionCache = async (
+      admissions: AdmissionSummary[],
+      deviceItems: CoordinatorDevice[],
+    ) => {
+      const targets = new Map<string, string>()
+
+      for (const summary of admissions) {
+        if (summary.admission_id) {
+          targets.set(summary.admission_id, summary.updated_at ?? '')
+        }
+      }
+
+      for (const item of deviceItems) {
+        if (item.last_admission_id && !targets.has(item.last_admission_id)) {
+          targets.set(item.last_admission_id, '')
+        }
+      }
+
+      if (targets.size === 0) {
+        return
+      }
+
+      await Promise.all(
+        Array.from(targets.entries(), ([admissionId, updatedAt]) =>
+          loadAdmissionDetailById(admissionId, updatedAt),
+        ),
+      )
+    }
+
     const refreshCoordinatorState = async () => {
       try {
-        const [status, devices, events] = await Promise.all([
-          fetchJson<CoordinatorStatusResponse>(`${COORDINATOR_HTTP_BASE}/api/v1/status`, abortController.signal),
-          fetchJson<CoordinatorDeviceResponse>(`${COORDINATOR_HTTP_BASE}/api/v1/devices`, abortController.signal),
-          fetchJson<CoordinatorEventsResponse>(`${COORDINATOR_HTTP_BASE}/api/v1/events?limit=20`, abortController.signal),
+        const [status, devices, admissions] = await Promise.all([
+          fetchJson<CoordinatorStatusResponse>(`${COORDINATOR_HTTP_BASE}/api/v2/status`, abortController.signal),
+          fetchJson<CoordinatorDeviceResponse>(`${COORDINATOR_HTTP_BASE}/api/v2/devices`, abortController.signal),
+          fetchJson<AdmissionsResponse>(`${COORDINATOR_HTTP_BASE}/api/v2/admissions?limit=10`, abortController.signal),
         ])
 
+        await warmAdmissionCache(admissions.items ?? [], devices.items ?? [])
+
+        if (abortController.signal.aborted || disposed) {
+          return
+        }
+
+        const latestAdmissionId = admissions.items?.[0]?.admission_id
+        const latestDetail = latestAdmissionId ? admissionCache.get(latestAdmissionId) ?? null : null
+
         startTransition(() => {
-          setData((previous) => mergeCoordinatorState(previous, status, devices, events))
+          setData((previous) =>
+            mergeCoordinatorState(previous, status, devices, admissions, latestDetail, admissionCache),
+          )
         })
 
         setConnection((previous) => ({
           ...previous,
           mode: 'live',
+          coordinatorConnected: Boolean(status.coordinator?.online || status.coordinator?.host_link_ready),
+          inferConnected: Boolean(status.rf_pipeline?.model_loaded),
           lastError: null,
         }))
       } catch (error) {
@@ -136,105 +289,25 @@ export function useDashboardData() {
           return
         }
 
+        setConnection((previous) => ({
+          ...previous,
+          coordinatorConnected: false,
+          inferConnected: false,
+        }))
         setError(error instanceof Error ? error.message : '加载协调器状态失败')
+      } finally {
+        scheduleRefresh()
       }
-    }
-
-    const scheduleRefresh = () => {
-      if (refreshTimer !== null) {
-        return
-      }
-
-      refreshTimer = window.setTimeout(() => {
-        refreshTimer = null
-        void refreshCoordinatorState()
-      }, 250)
     }
 
     void refreshCoordinatorState()
 
-    const coordinatorWs = new WebSocket(COORDINATOR_WS_URL)
-    coordinatorWs.onopen = () => {
-      setConnection((previous) => ({
-        ...previous,
-        coordinatorConnected: true,
-        mode: 'live',
-      }))
-    }
-    coordinatorWs.onerror = () => setError('协调器 WebSocket 连接失败')
-    coordinatorWs.onclose = () => {
-      setConnection((previous) => ({
-        ...previous,
-        coordinatorConnected: false,
-      }))
-    }
-    coordinatorWs.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data) as
-          | { type?: string; data?: CoordinatorStatusResponse }
-          | CoordinatorEvent
-
-        if ('type' in message && message.type === 'snapshot' && message.data) {
-          startTransition(() => {
-            setData((previous) =>
-              applyCoordinatorSnapshotPatch(previous, message.data as CoordinatorStatusResponse),
-            )
-          })
-          scheduleRefresh()
-          return
-        }
-
-        if ('event_type' in message) {
-          startTransition(() => {
-            setData((previous) => mergeCoordinatorEvent(previous, message))
-          })
-          scheduleRefresh()
-        }
-      } catch {
-        setError('协调器 WebSocket 消息解析失败')
-      }
-    }
-
-    const inferWs = new WebSocket(INFER_WS_URL)
-    inferWs.onopen = () => {
-      setConnection((previous) => ({
-        ...previous,
-        inferConnected: true,
-        mode: 'live',
-      }))
-    }
-    inferWs.onerror = () => setError('推理服务 WebSocket 连接失败')
-    inferWs.onclose = () => {
-      setConnection((previous) => ({
-        ...previous,
-        inferConnected: false,
-      }))
-    }
-    inferWs.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data) as InferResultMessage | { type?: string; error?: string }
-        if (message.type === 'infer_result') {
-          startTransition(() => {
-            setData((previous) => applyInferResult(previous, message as InferResultMessage))
-          })
-          return
-        }
-
-        if (message.type === 'infer_error' && message.error) {
-          setError(`推理服务返回错误: ${message.error}`)
-        }
-      } catch {
-        setError('推理服务消息解析失败')
-      }
-    }
-
     return () => {
+      disposed = true
       abortController.abort()
       if (refreshTimer !== null) {
         window.clearTimeout(refreshTimer)
       }
-      coordinatorWs.close()
-      inferWs.close()
     }
   }, [])
 
@@ -254,14 +327,33 @@ function mergeCoordinatorState(
   previous: DashboardData,
   status: CoordinatorStatusResponse,
   devices: CoordinatorDeviceResponse,
-  events: CoordinatorEventsResponse,
+  admissions: AdmissionsResponse,
+  latestDetail: AdmissionDetailResponse | null,
+  admissionCache: Map<string, AdmissionDetailResponse>,
 ): DashboardData {
-  const mappedDevices = (devices.items ?? []).map((item) => mapDevice(item, previous.devices))
-  const mappedHistory = mapHistory(events.items ?? [], mappedDevices, previous.history)
-  const joinContext = deriveJoiningContext(events.items ?? [], mappedDevices, previous)
+  if (latestDetail?.admission_id) {
+    admissionCache.set(latestDetail.admission_id, latestDetail)
+  }
+
+  const mappedDevices = (devices.items ?? []).map((item) =>
+    mapDevice(item, previous.devices, admissionCache, previous.offlineDevices),
+  )
+  const mappedHistory = mapHistory(
+    admissions.items ?? [],
+    mappedDevices,
+    admissionCache,
+    previous.offlineDevices,
+  )
+  const joiningDevice = mapLatestAdmission(
+    admissions.items?.[0] ?? null,
+    mappedDevices,
+    latestDetail,
+    previous.offlineDevices,
+  )
 
   return {
     ...previous,
+    tick: previous.tick + 1,
     coordinator: {
       ...previous.coordinator,
       ieeeAddr: status.coordinator?.ieee_addr ?? previous.coordinator.ieeeAddr,
@@ -270,102 +362,50 @@ function mergeCoordinatorState(
       permitJoinOpen: status.coordinator?.permit_join_open ?? previous.coordinator.permitJoinOpen,
       permitJoinRemaining:
         status.coordinator?.permit_join_remaining ?? previous.coordinator.permitJoinRemaining,
-      decisionMode: status.decision_mode ?? previous.coordinator.decisionMode,
+      decisionMode:
+        status.policy?.known_device_policy ??
+        status.rf_pipeline?.unknown_policy ??
+        previous.coordinator.decisionMode,
       pendingRequests:
-        Array.isArray(status.pending_requests)
-          ? status.pending_requests.length
-          : previous.coordinator.pendingRequests,
-      deviceCount: status.device_count ?? mappedDevices.length,
+        status.pending_counts?.access_requests ?? previous.coordinator.pendingRequests,
+      deviceCount: devices.count ?? mappedDevices.length,
       modelIdentifier:
         status.coordinator?.model_identifier ?? previous.coordinator.modelIdentifier,
       networkState: status.coordinator?.network_state ?? previous.coordinator.networkState,
     },
     devices: mappedDevices,
     history: mappedHistory,
-    joiningDevice: {
-      ...previous.joiningDevice,
-      ...joinContext,
-    },
+    joiningDevice,
   }
 }
 
-function applyCoordinatorSnapshotPatch(
-  previous: DashboardData,
-  snapshot: CoordinatorStatusResponse,
-): DashboardData {
-  return {
-    ...previous,
-    coordinator: {
-      ...previous.coordinator,
-      ieeeAddr: snapshot.coordinator?.ieee_addr ?? previous.coordinator.ieeeAddr,
-      panId: snapshot.coordinator?.pan_id ?? previous.coordinator.panId,
-      channel: snapshot.coordinator?.channel ?? previous.coordinator.channel,
-      permitJoinOpen: snapshot.coordinator?.permit_join_open ?? previous.coordinator.permitJoinOpen,
-      permitJoinRemaining:
-        snapshot.coordinator?.permit_join_remaining ?? previous.coordinator.permitJoinRemaining,
-      decisionMode: snapshot.decision_mode ?? previous.coordinator.decisionMode,
-      pendingRequests:
-        Array.isArray(snapshot.pending_requests)
-          ? snapshot.pending_requests.length
-          : previous.coordinator.pendingRequests,
-      deviceCount: snapshot.device_count ?? previous.coordinator.deviceCount,
-      modelIdentifier:
-        snapshot.coordinator?.model_identifier ?? previous.coordinator.modelIdentifier,
-      networkState: snapshot.coordinator?.network_state ?? previous.coordinator.networkState,
-    },
-  }
-}
-
-function mergeCoordinatorEvent(previous: DashboardData, event: CoordinatorEvent): DashboardData {
-  const mappedHistory = mapHistory([event], previous.devices, previous.history)
-  const joinContext = deriveJoiningContext([event], previous.devices, previous)
-
-  return {
-    ...previous,
-    history:
-      mappedHistory.length > 0
-        ? [...mappedHistory, ...previous.history].slice(0, 10)
-        : previous.history,
-    joiningDevice: {
-      ...previous.joiningDevice,
-      ...joinContext,
-    },
-  }
-}
-
-function applyInferResult(previous: DashboardData, message: InferResultMessage): DashboardData {
-  const predictedLabel = message.pred?.label ?? previous.joiningDevice.predictedLabel
-  const confidence = clampNumber(message.pred?.confidence, previous.joiningDevice.confidence)
-  const iqReal = sanitizeSeries(message.iq?.real, previous.joiningDevice.iqSamples.real)
-  const iqImag = sanitizeSeries(message.iq?.imag, previous.joiningDevice.iqSamples.imag)
-  const primary = buildHeatmapsFromGaf(message.gaf) ?? previous.joiningDevice.fingerprint.primary
-
-  return {
-    ...previous,
-    joiningDevice: {
-      ...previous.joiningDevice,
-      predictedLabel,
-      confidence,
-      signalScore: Math.round(confidence * 100),
-      iqSamples: {
-        real: iqReal,
-        imag: iqImag,
-      },
-      fingerprint: {
-        primary,
-        reference: previous.joiningDevice.fingerprint.reference,
-      },
-    },
-  }
-}
-
-function mapDevice(item: CoordinatorDevice, previousDevices: DeviceEntry[]): DeviceEntry {
-  const previous = previousDevices.find((device) => device.ieeeAddr === item.ieee_addr)
+function mapDevice(
+  item: CoordinatorDevice,
+  previousDevices: DeviceEntry[],
+  admissionCache: Map<string, AdmissionDetailResponse>,
+  offlineDevices: OfflineDevice[],
+): DeviceEntry {
+  const previous = previousDevices.find(
+    (device) =>
+      (item.ieee_addr && device.ieeeAddr === item.ieee_addr) ||
+      (item.short_addr && device.shortAddr === item.short_addr),
+  )
   const capability = item.capability ?? previous?.capability ?? '0x00'
   const shortAddr = item.short_addr ?? previous?.shortAddr ?? '--'
   const ieeeAddr = item.ieee_addr ?? previous?.ieeeAddr ?? '--'
-  const fingerprintId = readString(item.metadata?.fingerprint_id) ?? previous?.fingerprintId ?? 'unknown'
-  const matchedConfidence = readNumber(item.metadata?.score) ?? previous?.matchedConfidence ?? 0.88
+  const fingerprintId =
+    item.last_pred_label ??
+    readString(item.metadata?.fingerprint_id) ??
+    previous?.fingerprintId ??
+    'unknown'
+  const matchedConfidence = clampNumber(
+    item.last_pred_confidence ?? readNumber(item.metadata?.score),
+    previous?.matchedConfidence ?? 0,
+  )
+  const detail = item.last_admission_id ? admissionCache.get(item.last_admission_id) : null
+  const primary = buildHeatmapsFromGaf(detail?.gaf) ?? previous?.fingerprint.primary ?? []
+  const reference =
+    findReferenceFingerprint(fingerprintId, offlineDevices) ?? previous?.fingerprint.reference ?? []
 
   return {
     ieeeAddr,
@@ -374,102 +414,108 @@ function mapDevice(item: CoordinatorDevice, previousDevices: DeviceEntry[]): Dev
     capability,
     status: normalizeDeviceStatus(item.status, item.last_decision),
     lastDecision: normalizeDecision(item.last_decision, item.status),
-    lastSeenAt: item.last_seen_at ?? previous?.lastSeenAt ?? new Date().toISOString(),
+    lastSeenAt:
+      item.last_seen_at ?? item.last_decision_at ?? previous?.lastSeenAt ?? new Date().toISOString(),
     fingerprintId,
-    signalScore: previous?.signalScore ?? Math.round(matchedConfidence * 100),
+    signalScore: Math.round(matchedConfidence * 100),
     matchedConfidence,
     parentShort: item.parent_short ?? previous?.parentShort ?? '--',
-    fingerprint: previous?.fingerprint ?? createEmptyFingerprintBundle(),
+    fingerprint: {
+      primary,
+      reference,
+    },
   }
 }
 
 function mapHistory(
-  events: CoordinatorEvent[],
+  admissions: AdmissionSummary[],
   devices: DeviceEntry[],
-  previous: HistoryRecord[],
+  admissionCache: Map<string, AdmissionDetailResponse>,
+  offlineDevices: OfflineDevice[],
 ): HistoryRecord[] {
-  return events
-    .map((event) => mapHistoryItem(event, devices))
+  return admissions
+    .map((item) => mapHistoryItem(item, devices, admissionCache, offlineDevices))
     .filter((item): item is HistoryRecord => item !== null)
-    .concat(previous)
-    .filter((item, index, array) => array.findIndex((entry) => entry.id === item.id) === index)
     .slice(0, 10)
 }
 
-function mapHistoryItem(event: CoordinatorEvent, devices: DeviceEntry[]): HistoryRecord | null {
-  if (!event.event_type || !event.timestamp) {
+function mapHistoryItem(
+  admission: AdmissionSummary,
+  devices: DeviceEntry[],
+  admissionCache: Map<string, AdmissionDetailResponse>,
+  offlineDevices: OfflineDevice[],
+): HistoryRecord | null {
+  const admissionId = admission.admission_id
+  const shortAddr = admission.request?.short_addr
+  const timestamp = admission.updated_at ?? admission.created_at
+
+  if (!admissionId || !shortAddr || !timestamp) {
     return null
   }
 
-  const payload = event.payload ?? {}
-  const decision = normalizeEventDecision(event.event_type, payload)
-  if (!decision) {
-    return null
-  }
-
-  const shortAddr = pickString(payload, ['short_addr', 'shortAddr']) ?? '--'
   const matchedDevice = devices.find((item) => item.shortAddr === shortAddr)
-  const matchedLabel =
-    pickNestedString(payload, ['details', 'response', 'fingerprint_id']) ??
-    pickNestedString(payload, ['response', 'fingerprint_id']) ??
-    matchedDevice?.fingerprintId ??
-    'unknown'
+  const detail = admissionCache.get(admissionId)
+  const decision = normalizeAdmissionDecision(admission.decision, admission.status)
+  const matchedLabel = admission.pred?.label ?? matchedDevice?.fingerprintId ?? 'unknown'
+  const reference = findReferenceFingerprint(matchedLabel, offlineDevices) ?? []
 
   return {
-    id: event.id ?? Date.now(),
-    ieeeAddr:
-      pickString(payload, ['ieee_addr', 'ext_addr', 'long_addr', 'ieeeAddr']) ??
-      matchedDevice?.ieeeAddr ??
-      '--',
+    id: admissionId,
+    ieeeAddr: matchedDevice?.ieeeAddr ?? '--',
     shortAddr,
     decision,
-    decisionLabel:
-      decision === 'allow' ? '准许' : decision === 'deny' ? '拒绝' : '待决策',
+    decisionLabel: formatDecisionLabel(decision),
     matchedLabel,
-    timestamp: event.timestamp,
-    latencyMs: Math.round(readNumber(payload.latency_ms) ?? 0),
-    reason:
-      pickNestedString(payload, ['details', 'response', 'reason']) ??
-      pickNestedString(payload, ['response', 'reason']) ??
-      event.event_type,
-    fingerprint: createEmptyFingerprintBundle(),
+    timestamp,
+    latencyMs: Math.round(readNumber(admission.timing?.total_ms) ?? 0),
+    reason: admission.reason ?? admission.error ?? admission.status ?? '--',
+    fingerprint: {
+      primary: buildHeatmapsFromGaf(detail?.gaf) ?? [],
+      reference,
+    },
   }
 }
 
-function deriveJoiningContext(
-  events: CoordinatorEvent[],
+function mapLatestAdmission(
+  latestAdmission: AdmissionSummary | null,
   devices: DeviceEntry[],
-  previous: DashboardData,
-) {
-  const joinEvent = events.find((event) =>
-    ['access_request', 'device_associated', 'device_announce', 'access_decision', 'access_result'].includes(
-      event.event_type ?? '',
-    ),
-  )
-
-  if (!joinEvent) {
-    return {}
+  latestDetail: AdmissionDetailResponse | null,
+  offlineDevices: OfflineDevice[],
+): JoiningDevice {
+  if (!latestAdmission?.request?.short_addr) {
+    return createEmptyJoiningDevice()
   }
 
-  const payload = joinEvent.payload ?? {}
-  const shortAddr =
-    pickString(payload, ['short_addr', 'shortAddr']) ?? previous.joiningDevice.shortAddr
+  const shortAddr = latestAdmission.request.short_addr
   const matchedDevice = devices.find((device) => device.shortAddr === shortAddr)
+  const predictedLabel = latestAdmission.pred?.label ?? ''
+  const confidence = clampNumber(latestAdmission.pred?.confidence, 0)
+  const decision = normalizeAdmissionDecision(latestAdmission.decision, latestAdmission.status)
 
   return {
-    ieeeAddr:
-      pickString(payload, ['ieee_addr', 'ext_addr', 'long_addr', 'ieeeAddr']) ??
-      matchedDevice?.ieeeAddr ??
-      previous.joiningDevice.ieeeAddr,
+    ieeeAddr: matchedDevice?.ieeeAddr ?? '--',
     shortAddr,
-    role: matchedDevice?.role ?? previous.joiningDevice.role,
-    capability:
-      pickString(payload, ['capability']) ?? matchedDevice?.capability ?? previous.joiningDevice.capability,
-    joinStage: mapJoinStage(joinEvent.event_type ?? previous.joiningDevice.joinStage),
+    role: matchedDevice?.role ?? inferRole(latestAdmission.request.capability ?? '--', shortAddr),
+    capability: latestAdmission.request.capability ?? matchedDevice?.capability ?? '--',
+    joinStage: mapAdmissionStage(latestAdmission),
+    predictedLabel,
+    confidence,
+    signalScore: Math.round(confidence * 100),
+    decision,
+    decisionText: formatDecisionText(decision),
+    reason: latestAdmission.reason ?? latestAdmission.error ?? latestAdmission.status ?? '--',
+    iqSamples: {
+      real: sanitizeSeries(latestDetail?.iq?.real, []),
+      imag: sanitizeSeries(latestDetail?.iq?.imag, []),
+    },
+    fingerprint: {
+      primary: buildHeatmapsFromGaf(latestDetail?.gaf) ?? [],
+      reference: findReferenceFingerprint(predictedLabel, offlineDevices) ?? [],
+    },
   }
 }
 
-function buildHeatmapsFromGaf(gaf: InferResultMessage['gaf']): FingerprintMatrix[] | null {
+function buildHeatmapsFromGaf(gaf: AdmissionDetailResponse['gaf']): FingerprintMatrix[] | null {
   const shape = gaf?.shape ?? []
   const data = gaf?.data
   if (!Array.isArray(data) || shape[0] !== 2 || shape[1] !== 256 || shape[2] !== 256) {
@@ -481,11 +527,7 @@ function buildHeatmapsFromGaf(gaf: InferResultMessage['gaf']): FingerprintMatrix
   )
 }
 
-function matrixToHeatmap(
-  matrix: number[][],
-  title: string,
-  subtitle: string,
-): FingerprintMatrix {
+function matrixToHeatmap(matrix: number[][], title: string, subtitle: string): FingerprintMatrix {
   const points: Array<[number, number, number]> = []
   let max = 0
 
@@ -533,69 +575,86 @@ function createLiveDashboardData(): DashboardData {
     },
     devices: [],
     history: [],
-    joiningDevice: {
-      ieeeAddr: '--',
-      shortAddr: '--',
-      role: '--',
-      capability: '--',
-      joinStage: '暂无入网请求',
-      predictedLabel: '',
-      confidence: 0,
-      signalScore: 0,
-      iqSamples: {
-        real: [],
-        imag: [],
-      },
-      fingerprint: createEmptyFingerprintBundle(),
-    },
+    joiningDevice: createEmptyJoiningDevice(),
   }
 }
 
-function normalizeDeviceStatus(status?: string, lastDecision?: string): DeviceStatus {
-  if (status === 'allowed') {
+function createEmptyJoiningDevice(): JoiningDevice {
+  return {
+    ieeeAddr: '--',
+    shortAddr: '--',
+    role: '--',
+    capability: '--',
+    joinStage: '暂无入网请求',
+    predictedLabel: '',
+    confidence: 0,
+    signalScore: 0,
+    decision: 'pending',
+    decisionText: '待判定',
+    reason: '--',
+    iqSamples: {
+      real: [],
+      imag: [],
+    },
+    fingerprint: createEmptyFingerprintBundle(),
+  }
+}
+
+function normalizeDeviceStatus(status?: string | null, lastDecision?: string | null): DeviceStatus {
+  const normalizedStatus = (status ?? '').toLowerCase()
+  if (normalizedStatus === 'allowed') {
     return 'allowed'
   }
-  if (status === 'denied' || lastDecision === 'deny') {
+  if (normalizedStatus === 'denied' || normalizedStatus === 'deny_action' || lastDecision === 'deny') {
     return 'denied'
   }
-  if (status === 'pending') {
+  if (
+    ['pending', 'pending_match', 'matched', 'associated', 'updated', 'announced'].includes(
+      normalizedStatus,
+    )
+  ) {
     return 'pending'
   }
-  if (status === 'offline') {
+  if (normalizedStatus === 'offline' || normalizedStatus === 'left') {
     return 'offline'
   }
-  return 'allowed'
+  return 'pending'
 }
 
-function normalizeDecision(value?: string, fallback?: string): DeviceDecision {
+function normalizeDecision(value?: string | null, fallback?: string | null): DeviceDecision {
   const raw = (value ?? fallback ?? '').toLowerCase()
   if (raw.includes('deny')) {
     return 'deny'
   }
-  if (raw.includes('pending') || raw.includes('request')) {
+  if (
+    raw.includes('pending') ||
+    raw.includes('request') ||
+    raw.includes('match') ||
+    raw.includes('associate') ||
+    raw.includes('announce')
+  ) {
     return 'pending'
   }
   return 'allow'
 }
 
-function normalizeEventDecision(
-  eventType: string,
-  payload: Record<string, unknown>,
-): DeviceDecision | null {
-  const decision = pickString(payload, ['decision'])?.toLowerCase()
-  if (decision === 'allow') {
+function normalizeAdmissionDecision(decision?: string | null, status?: string | null): DeviceDecision {
+  const normalizedDecision = (decision ?? '').toLowerCase()
+  if (normalizedDecision === 'allow') {
     return 'allow'
   }
-  if (decision === 'deny') {
+  if (normalizedDecision === 'deny') {
     return 'deny'
   }
-  if (eventType === 'access_request' || eventType === 'device_associated') {
-    return 'pending'
+
+  const normalizedStatus = (status ?? '').toLowerCase()
+  if (normalizedStatus === 'timeout' || normalizedStatus === 'error') {
+    return 'deny'
   }
-  if (eventType === 'access_result' || eventType === 'access_decision') {
+  if (normalizedStatus === 'completed') {
     return 'allow'
   }
-  return null
+  return 'pending'
 }
 
 function inferRole(capability: string, shortAddr: string) {
@@ -615,16 +674,19 @@ function inferRole(capability: string, shortAddr: string) {
   return 'Node'
 }
 
-function mapJoinStage(eventType: string) {
-  switch (eventType) {
-    case 'device_associated':
-      return '设备关联'
-    case 'device_announce':
-      return '设备广播'
-    case 'access_decision':
-      return '等待判定'
-    case 'access_result':
-      return '回传结果'
+function mapAdmissionStage(admission: AdmissionSummary) {
+  const status = (admission.status ?? '').toLowerCase()
+  const decision = (admission.decision ?? '').toLowerCase()
+
+  switch (status) {
+    case 'matched':
+      return '等待推理'
+    case 'completed':
+      return decision === 'allow' ? '准入完成' : '拒绝入网'
+    case 'timeout':
+      return '匹配超时'
+    case 'error':
+      return '推理失败'
     default:
       return '申请入网'
   }
@@ -638,7 +700,7 @@ function sanitizeSeries(value: number[] | undefined, fallback: number[]) {
   return value.slice(0, 1028).map((item) => (Number.isFinite(item) ? item : 0))
 }
 
-function clampNumber(value: number | undefined, fallback: number) {
+function clampNumber(value: number | undefined | null, fallback: number) {
   if (typeof value !== 'number' || Number.isNaN(value)) {
     return fallback
   }
@@ -646,35 +708,47 @@ function clampNumber(value: number | undefined, fallback: number) {
   return Math.max(0, Math.min(1, value))
 }
 
-function pickString(payload: Record<string, unknown>, keys: string[]) {
-  for (const key of keys) {
-    const value = payload[key]
-    if (typeof value === 'string' && value.length > 0) {
-      return value
-    }
-  }
-  return null
-}
-
-function pickNestedString(payload: Record<string, unknown>, keys: string[]) {
-  let current: unknown = payload
-  for (const key of keys) {
-    if (!current || typeof current !== 'object') {
-      return null
-    }
-    current = (current as Record<string, unknown>)[key]
-  }
-  return typeof current === 'string' ? current : null
-}
-
 function readString(value: unknown) {
   return typeof value === 'string' ? value : null
 }
 
 function readNumber(value: unknown) {
-  return typeof value === 'number' ? value : null
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value
+  }
+
+  if (typeof value === 'string' && value.trim().length > 0) {
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : null
+  }
+
+  return null
 }
 
 function trimTrailingSlash(value: string) {
   return value.endsWith('/') ? value.slice(0, -1) : value
+}
+
+function findReferenceFingerprint(label: string, offlineDevices: OfflineDevice[]) {
+  if (!label) {
+    return null
+  }
+
+  return offlineDevices.find((device) => device.label === label)?.fingerprint ?? null
+}
+
+function clampPollInterval(value: number) {
+  if (!Number.isFinite(value)) {
+    return 3000
+  }
+
+  return Math.max(1000, Math.min(30000, Math.round(value)))
+}
+
+function formatDecisionLabel(decision: DeviceDecision) {
+  return decision === 'allow' ? '准许' : decision === 'deny' ? '拒绝' : '待决策'
+}
+
+function formatDecisionText(decision: DeviceDecision) {
+  return decision === 'allow' ? '允许入网' : decision === 'deny' ? '拒绝入网' : '待判定'
 }

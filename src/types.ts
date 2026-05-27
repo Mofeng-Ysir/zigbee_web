@@ -53,6 +53,9 @@ export interface JoiningDevice {
   predictedLabel: string
   confidence: number
   signalScore: number
+  decision: DeviceDecision
+  decisionText: string
+  reason: string
   iqSamples: {
     real: number[]
     imag: number[]
@@ -61,7 +64,7 @@ export interface JoiningDevice {
 }
 
 export interface HistoryRecord {
-  id: number
+  id: string | number
   ieeeAddr: string
   shortAddr: string
   decision: DeviceDecision

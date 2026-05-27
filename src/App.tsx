@@ -163,8 +163,10 @@ function App() {
           <div>
             <strong>{liveEnabled ? '实时联调' : '模拟数据'}</strong>
             <span>
-              协调器 {connection.coordinatorConnected ? 'WS 已连接' : 'WS 未连接'} · 推理{' '}
-              {connection.inferConnected ? 'WS 已连接' : 'WS 未连接'}
+              {connection.lastError ??
+                `协调器 ${connection.coordinatorConnected ? '在线' : '离线'} · 推理 ${
+                  connection.inferConnected ? '模型已就绪' : '模型未就绪'
+                }`}
             </span>
           </div>
         </div>
@@ -347,7 +349,7 @@ function RealtimeView({
               <PanelTitle icon={<Radio size={16} strokeWidth={1.8} />} title="正在入网设备" />
               <span className="pulse-badge">
                 <span className="pulse-dot" />
-                AI 识别中
+                {getJoiningBadgeText(data.joiningDevice)}
               </span>
             </div>
           }
@@ -383,9 +385,9 @@ function RealtimeView({
                       </div>
                       <strong>神经网络识别</strong>
                     </div>
-                    <span className="decision-state">
+                    <span className={`decision-state ${data.joiningDevice.decision}`}>
                       <span className="decision-state-dot" />
-                      自动判定 · 通过
+                      {getJoiningStateText(data.joiningDevice)}
                     </span>
                   </div>
                   <div className="decision-score-row">
@@ -394,7 +396,7 @@ function RealtimeView({
                   </div>
                   <div className="decision-progress">
                     <div
-                      className="decision-progress-fill"
+                      className={`decision-progress-fill ${data.joiningDevice.decision}`}
                       style={{ width: `${Math.round(data.joiningDevice.confidence * 1000) / 10}%` }}
                     />
                   </div>
@@ -405,11 +407,13 @@ function RealtimeView({
                     </div>
                     <div className="decision-footer-item plain">
                       <span>推理标签</span>
-                      <strong>{data.joiningDevice.predictedLabel}</strong>
+                      <strong>{data.joiningDevice.predictedLabel || '--'}</strong>
                     </div>
                     <div className="decision-footer-item plain">
                       <span>决策</span>
-                      <strong className="decision-allow">允许入网</strong>
+                      <strong className={`decision-${data.joiningDevice.decision}`}>
+                        {data.joiningDevice.decisionText}
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -870,7 +874,7 @@ function createDialogMetrics(target: DeviceEntry | JoiningDevice | HistoryRecord
     ['长地址', target.ieeeAddr],
     ['短地址', target.shortAddr],
     ['设备类型', target.role],
-    ['识别结果', target.predictedLabel],
+    ['识别结果', target.predictedLabel || target.decisionText],
   ] as const
 }
 
@@ -879,7 +883,19 @@ function hasJoiningIdentity(target: JoiningDevice) {
 }
 
 function hasJoiningPrediction(target: JoiningDevice) {
-  return target.predictedLabel.trim().length > 0 || target.confidence > 0
+  return target.predictedLabel.trim().length > 0 || target.confidence > 0 || target.decision !== 'pending'
+}
+
+function getJoiningStateText(target: JoiningDevice) {
+  return `自动判定 · ${target.decision === 'allow' ? '通过' : target.decision === 'deny' ? '拒绝' : '待判定'}`
+}
+
+function getJoiningBadgeText(target: JoiningDevice) {
+  return target.decision === 'allow'
+    ? 'AI 已放行'
+    : target.decision === 'deny'
+      ? 'AI 已拒绝'
+      : 'AI 识别中'
 }
 
 function hasIqSamples(target: JoiningDevice) {
