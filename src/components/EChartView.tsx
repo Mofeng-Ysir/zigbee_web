@@ -17,38 +17,87 @@ registerCharts([
 export function EChartView({ option }: { option: EChartsCoreOption }) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<EChartsType | null>(null)
-  const frameRef = useRef<number | null>(null)
   const mountedRef = useRef(false)
   const optionRef = useRef(option)
+  const optionFrameRef = useRef<number | null>(null)
+  const resizeFrameRef = useRef<number | null>(null)
+  const sizeRef = useRef({ width: 0, height: 0 })
   optionRef.current = option
 
-  const scheduleRender = () => {
+  const ensureChart = () => {
+    const host = hostRef.current
+    if (!host || host.clientWidth === 0 || host.clientHeight === 0) {
+      return null
+    }
+
+    let chart = chartRef.current
+    if (!chart) {
+      chart = init(host, undefined, {
+        renderer: 'canvas',
+      })
+      chartRef.current = chart
+      sizeRef.current = {
+        width: host.clientWidth,
+        height: host.clientHeight,
+      }
+    }
+
+    return chart
+  }
+
+  const scheduleOptionUpdate = () => {
     if (!mountedRef.current) {
       return
     }
-
-    if (frameRef.current !== null) {
-      window.cancelAnimationFrame(frameRef.current)
+    if (optionFrameRef.current !== null) {
+      window.cancelAnimationFrame(optionFrameRef.current)
     }
 
-    frameRef.current = window.requestAnimationFrame(() => {
-      frameRef.current = null
+    optionFrameRef.current = window.requestAnimationFrame(() => {
+      optionFrameRef.current = null
+      const chart = ensureChart()
+      if (!chart) {
+        return
+      }
+
+      try {
+        chart.setOption(optionRef.current, true)
+      } catch {
+        // Ignore transient resize/dispose races during mount-unmount transitions.
+      }
+    })
+  }
+
+  const scheduleResize = () => {
+    if (!mountedRef.current) {
+      return
+    }
+    if (resizeFrameRef.current !== null) {
+      window.cancelAnimationFrame(resizeFrameRef.current)
+    }
+
+    resizeFrameRef.current = window.requestAnimationFrame(() => {
+      resizeFrameRef.current = null
       const host = hostRef.current
       if (!host || host.clientWidth === 0 || host.clientHeight === 0) {
         return
       }
 
-      let chart = chartRef.current
+      const width = host.clientWidth
+      const height = host.clientHeight
+      const previous = sizeRef.current
+      if (previous.width === width && previous.height === height && chartRef.current) {
+        return
+      }
+      sizeRef.current = { width, height }
+
+      const chart = ensureChart()
       if (!chart) {
-        chart = init(host, undefined, {
-          renderer: 'canvas',
-        })
-        chartRef.current = chart
+        return
       }
 
       try {
-        chart.setOption(optionRef.current, true)
-        chart.resize()
+        chart.resize({ width, height })
       } catch {
         // Ignore transient resize/dispose races during mount-unmount transitions.
       }
@@ -65,20 +114,24 @@ export function EChartView({ option }: { option: EChartsCoreOption }) {
     }
 
     const resizeObserver = new ResizeObserver(() => {
-      scheduleRender()
+      scheduleResize()
     })
 
     resizeObserver.observe(host)
-    window.addEventListener('resize', scheduleRender)
-    scheduleRender()
+    window.addEventListener('resize', scheduleResize)
+    scheduleOptionUpdate()
 
     return () => {
       mountedRef.current = false
       resizeObserver.disconnect()
-      window.removeEventListener('resize', scheduleRender)
-      if (frameRef.current !== null) {
-        window.cancelAnimationFrame(frameRef.current)
-        frameRef.current = null
+      window.removeEventListener('resize', scheduleResize)
+      if (optionFrameRef.current !== null) {
+        window.cancelAnimationFrame(optionFrameRef.current)
+        optionFrameRef.current = null
+      }
+      if (resizeFrameRef.current !== null) {
+        window.cancelAnimationFrame(resizeFrameRef.current)
+        resizeFrameRef.current = null
       }
       const chart = chartRef.current
       chartRef.current = null
@@ -93,7 +146,7 @@ export function EChartView({ option }: { option: EChartsCoreOption }) {
   }, [])
 
   useEffect(() => {
-    scheduleRender()
+    scheduleOptionUpdate()
   }, [option])
 
   return <div ref={hostRef} className="echart-host" />

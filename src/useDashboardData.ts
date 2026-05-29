@@ -1,4 +1,4 @@
-import { startTransition, useEffect, useState } from 'react'
+import { startTransition, useEffect, useRef, useState } from 'react'
 import { createMockDashboardData, tickDashboardData } from './mockData'
 import type {
   DashboardData,
@@ -143,6 +143,8 @@ interface DashboardConnectionState {
   lastError: string | null
 }
 
+type ModalTarget = DeviceEntry | JoiningDevice | HistoryRecord
+
 export function useDashboardData() {
   const [data, setData] = useState<DashboardData>(() =>
     LIVE_ENABLED ? createLiveDashboardData() : createMockDashboardData(),
@@ -153,6 +155,79 @@ export function useDashboardData() {
     inferConnected: false,
     lastError: null,
   })
+  const admissionCacheRef = useRef(new Map<string, AdmissionDetailResponse>())
+  const admissionCacheVersionRef = useRef(new Map<string, string>())
+  const admissionRequestRef = useRef(new Map<string, Promise<AdmissionDetailResponse | null>>())
+
+  const setError = (message: string) => {
+    setConnection((previous) => ({
+      ...previous,
+      lastError: message,
+    }))
+  }
+
+  const loadAdmissionDetailById = async (
+    admissionId: string,
+    updatedAt = '',
+    signal?: AbortSignal,
+    force = false,
+  ) => {
+    const admissionCache = admissionCacheRef.current
+    const admissionCacheVersion = admissionCacheVersionRef.current
+    const cachedVersion = admissionCacheVersion.get(admissionId) ?? ''
+    if (!force && admissionCache.has(admissionId) && (!updatedAt || cachedVersion === updatedAt)) {
+      return admissionCache.get(admissionId) ?? null
+    }
+
+    const pending = admissionRequestRef.current.get(admissionId)
+    if (pending) {
+      return pending
+    }
+
+    const request = (async () => {
+      try {
+        const detail = await fetchJson<AdmissionDetailResponse>(
+          `${COORDINATOR_HTTP_BASE}/api/v2/admissions/${admissionId}`,
+          signal,
+          force ? 'no-store' : 'default',
+        )
+        admissionCache.set(admissionId, detail)
+        admissionCacheVersion.set(admissionId, updatedAt || detail.updated_at || cachedVersion)
+        pruneAdmissionCache(admissionCache, admissionCacheVersion)
+        return detail
+      } catch (error) {
+        if (!signal?.aborted) {
+          setError(
+            error instanceof Error ? `准入详情加载失败: ${error.message}` : '准入详情加载失败',
+          )
+        }
+        return admissionCache.get(admissionId) ?? null
+      } finally {
+        admissionRequestRef.current.delete(admissionId)
+      }
+    })()
+
+    admissionRequestRef.current.set(admissionId, request)
+    return request
+  }
+
+  const loadAdmissionTarget = async (target: ModalTarget) => {
+    if (!LIVE_ENABLED) {
+      return target
+    }
+
+    const admissionId = getTargetAdmissionId(target)
+    if (!admissionId) {
+      return target
+    }
+
+    const detail = await loadAdmissionDetailById(admissionId, '', undefined, true)
+    if (!detail) {
+      return target
+    }
+
+    return hydrateTargetWithAdmissionDetail(target, detail)
+  }
 
   useEffect(() => {
     if (!LIVE_ENABLED) {
@@ -166,17 +241,9 @@ export function useDashboardData() {
     }
 
     const abortController = new AbortController()
-    const admissionCache = new Map<string, AdmissionDetailResponse>()
-    const admissionCacheVersion = new Map<string, string>()
+    const admissionCache = admissionCacheRef.current
     let disposed = false
     let refreshTimer: number | null = null
-
-    const setError = (message: string) => {
-      setConnection((previous) => ({
-        ...previous,
-        lastError: message,
-      }))
-    }
 
     const scheduleRefresh = () => {
       if (disposed || refreshTimer !== null) {
@@ -187,42 +254,6 @@ export function useDashboardData() {
         refreshTimer = null
         void refreshCoordinatorState()
       }, POLL_INTERVAL_MS)
-    }
-
-    const pruneAdmissionCache = () => {
-      while (admissionCache.size > 24) {
-        const oldestKey = admissionCache.keys().next().value
-        if (!oldestKey) {
-          break
-        }
-        admissionCache.delete(oldestKey)
-        admissionCacheVersion.delete(oldestKey)
-      }
-    }
-
-    const loadAdmissionDetailById = async (admissionId: string, updatedAt = '') => {
-      const cachedVersion = admissionCacheVersion.get(admissionId) ?? ''
-      if (admissionCache.has(admissionId) && (!updatedAt || cachedVersion === updatedAt)) {
-        return admissionCache.get(admissionId) ?? null
-      }
-
-      try {
-        const detail = await fetchJson<AdmissionDetailResponse>(
-          `${COORDINATOR_HTTP_BASE}/api/v2/admissions/${admissionId}`,
-          abortController.signal,
-        )
-        admissionCache.set(admissionId, detail)
-        admissionCacheVersion.set(admissionId, updatedAt || detail.updated_at || cachedVersion)
-        pruneAdmissionCache()
-        return detail
-      } catch (error) {
-        if (!abortController.signal.aborted) {
-          setError(
-            error instanceof Error ? `准入详情加载失败: ${error.message}` : '准入详情加载失败',
-          )
-        }
-        return admissionCache.get(admissionId) ?? null
-      }
     }
 
     const warmAdmissionCache = async (
@@ -249,7 +280,7 @@ export function useDashboardData() {
 
       await Promise.all(
         Array.from(targets.entries(), ([admissionId, updatedAt]) =>
-          loadAdmissionDetailById(admissionId, updatedAt),
+          loadAdmissionDetailById(admissionId, updatedAt, abortController.signal),
         ),
       )
     }
@@ -311,11 +342,75 @@ export function useDashboardData() {
     }
   }, [])
 
-  return { data, connection, liveEnabled: LIVE_ENABLED }
+  return { data, connection, liveEnabled: LIVE_ENABLED, loadAdmissionTarget }
 }
 
-async function fetchJson<T>(url: string, signal: AbortSignal) {
-  const response = await fetch(url, { signal })
+function getTargetAdmissionId(target: ModalTarget) {
+  if ('joinStage' in target || 'fingerprintId' in target) {
+    return target.admissionId
+  }
+
+  return target.admissionId ?? (typeof target.id === 'string' ? target.id : null)
+}
+
+function hydrateTargetWithAdmissionDetail(target: ModalTarget, detail: AdmissionDetailResponse): ModalTarget {
+  const primary = buildHeatmapsFromGaf(detail.gaf) ?? target.fingerprint.primary
+
+  if ('joinStage' in target) {
+    return {
+      ...target,
+      admissionId: target.admissionId ?? detail.admission_id ?? null,
+      iqSamples: {
+        real: sanitizeSeries(detail.iq?.real, target.iqSamples.real),
+        imag: sanitizeSeries(detail.iq?.imag, target.iqSamples.imag),
+      },
+      fingerprint: {
+        ...target.fingerprint,
+        primary,
+      },
+    }
+  }
+
+  if ('fingerprintId' in target) {
+    return {
+      ...target,
+      admissionId: target.admissionId ?? detail.admission_id ?? null,
+      fingerprint: {
+        ...target.fingerprint,
+        primary,
+      },
+    }
+  }
+
+  return {
+    ...target,
+    admissionId: target.admissionId ?? detail.admission_id ?? null,
+    fingerprint: {
+      ...target.fingerprint,
+      primary,
+    },
+  }
+}
+
+function pruneAdmissionCache(
+  admissionCache: Map<string, AdmissionDetailResponse>,
+  admissionCacheVersion: Map<string, string>,
+) {
+  while (admissionCache.size > 24) {
+    const oldestKey = admissionCache.keys().next().value
+    if (!oldestKey) {
+      break
+    }
+    admissionCache.delete(oldestKey)
+    admissionCacheVersion.delete(oldestKey)
+  }
+}
+
+async function fetchJson<T>(url: string, signal?: AbortSignal, cache: RequestCache = 'default') {
+  const response = await fetch(url, {
+    signal,
+    cache,
+  })
   if (!response.ok) {
     throw new Error(`请求失败: ${response.status} ${response.statusText}`)
   }
@@ -335,8 +430,16 @@ function mergeCoordinatorState(
     admissionCache.set(latestDetail.admission_id, latestDetail)
   }
 
+  const latestAdmissionByShortAddr = buildLatestAdmissionByShortAddr(admissions.items ?? [])
+
   const mappedDevices = (devices.items ?? []).map((item) =>
-    mapDevice(item, previous.devices, admissionCache, previous.offlineDevices),
+    mapDevice(
+      item,
+      previous.devices,
+      admissionCache,
+      previous.offlineDevices,
+      latestAdmissionByShortAddr,
+    ),
   )
   const mappedHistory = mapHistory(
     admissions.items ?? [],
@@ -384,6 +487,7 @@ function mapDevice(
   previousDevices: DeviceEntry[],
   admissionCache: Map<string, AdmissionDetailResponse>,
   offlineDevices: OfflineDevice[],
+  latestAdmissionByShortAddr: Map<string, AdmissionSummary>,
 ): DeviceEntry {
   const previous = previousDevices.find(
     (device) =>
@@ -402,7 +506,9 @@ function mapDevice(
     item.last_pred_confidence ?? readNumber(item.metadata?.score),
     previous?.matchedConfidence ?? 0,
   )
-  const detail = item.last_admission_id ? admissionCache.get(item.last_admission_id) : null
+  const fallbackAdmissionId = latestAdmissionByShortAddr.get(shortAddr)?.admission_id ?? null
+  const admissionId = item.last_admission_id ?? fallbackAdmissionId ?? previous?.admissionId ?? null
+  const detail = admissionId ? admissionCache.get(admissionId) : null
   const primary = buildHeatmapsFromGaf(detail?.gaf) ?? previous?.fingerprint.primary ?? []
   const reference =
     findReferenceFingerprint(fingerprintId, offlineDevices) ?? previous?.fingerprint.reference ?? []
@@ -420,6 +526,7 @@ function mapDevice(
     signalScore: Math.round(matchedConfidence * 100),
     matchedConfidence,
     parentShort: item.parent_short ?? previous?.parentShort ?? '--',
+    admissionId,
     fingerprint: {
       primary,
       reference,
@@ -469,6 +576,7 @@ function mapHistoryItem(
     timestamp,
     latencyMs: Math.round(readNumber(admission.timing?.total_ms) ?? 0),
     reason: admission.reason ?? admission.error ?? admission.status ?? '--',
+    admissionId,
     fingerprint: {
       primary: buildHeatmapsFromGaf(detail?.gaf) ?? [],
       reference,
@@ -504,6 +612,7 @@ function mapLatestAdmission(
     decision,
     decisionText: formatDecisionText(decision),
     reason: latestAdmission.reason ?? latestAdmission.error ?? latestAdmission.status ?? '--',
+    admissionId: latestAdmission.admission_id ?? null,
     iqSamples: {
       real: sanitizeSeries(latestDetail?.iq?.real, []),
       imag: sanitizeSeries(latestDetail?.iq?.imag, []),
@@ -513,6 +622,20 @@ function mapLatestAdmission(
       reference: findReferenceFingerprint(predictedLabel, offlineDevices) ?? [],
     },
   }
+}
+
+function buildLatestAdmissionByShortAddr(admissions: AdmissionSummary[]) {
+  const result = new Map<string, AdmissionSummary>()
+
+  for (const admission of admissions) {
+    const shortAddr = admission.request?.short_addr
+    if (!shortAddr || result.has(shortAddr)) {
+      continue
+    }
+    result.set(shortAddr, admission)
+  }
+
+  return result
 }
 
 function buildHeatmapsFromGaf(gaf: AdmissionDetailResponse['gaf']): FingerprintMatrix[] | null {
@@ -529,21 +652,34 @@ function buildHeatmapsFromGaf(gaf: AdmissionDetailResponse['gaf']): FingerprintM
 
 function matrixToHeatmap(matrix: number[][], title: string, subtitle: string): FingerprintMatrix {
   const points: Array<[number, number, number]> = []
-  let max = 0
+  let min = Number.POSITIVE_INFINITY
+  let max = Number.NEGATIVE_INFINITY
 
   for (let y = 0; y < matrix.length; y += 1) {
     const row = matrix[y] ?? []
     for (let x = 0; x < row.length; x += 1) {
-      const value = Number(row[x] ?? 0)
+      const rawValue = Number(row[x] ?? 0)
+      const value = Number.isFinite(rawValue) ? rawValue : 0
+      min = Math.min(min, value)
       max = Math.max(max, value)
-      points.push([x, y, Number.isFinite(value) ? value : 0])
+      points.push([x, y, value])
     }
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    min = -1
+    max = 1
+  } else if (min === max) {
+    const padding = Math.abs(min) < 1e-6 ? 1 : Math.abs(min) * 0.1
+    min -= padding
+    max += padding
   }
 
   return {
     title,
     subtitle,
-    max: max > 0 ? max : 1,
+    min,
+    max,
     points,
   }
 }
@@ -592,6 +728,7 @@ function createEmptyJoiningDevice(): JoiningDevice {
     decision: 'pending',
     decisionText: '待判定',
     reason: '--',
+    admissionId: null,
     iqSamples: {
       real: [],
       imag: [],
