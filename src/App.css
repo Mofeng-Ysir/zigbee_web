@@ -1067,6 +1067,60 @@
   min-height: inherit;
 }
 
+.echart-host__chart {
+  width: 100%;
+  height: 100%;
+  min-height: inherit;
+}
+
+.heatmap-canvas-shell {
+  width: 100%;
+  height: 100%;
+  min-height: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+}
+
+.heatmap-canvas-shell.compact {
+  gap: 6px;
+  padding: 8px;
+}
+
+.heatmap-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.heatmap-legend.compact {
+  gap: 0;
+}
+
+.heatmap-legend-bar {
+  height: 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(111, 136, 175, 0.3);
+}
+
+.heatmap-legend-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #6f88af;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.heatmap-canvas {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: block;
+  image-rendering: pixelated;
+}
+
 .empty-shell {
   display: grid;
   place-items: center;
