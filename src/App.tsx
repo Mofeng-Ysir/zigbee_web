@@ -57,6 +57,15 @@ function App() {
   const [selectedOfflineFingerprint, setSelectedOfflineFingerprint] = useState<FingerprintMatrix[] | null>(
     null,
   )
+  const [comparisonLeftLabel, setComparisonLeftLabel] = useState(
+    data.offlineDevices[0]?.label ?? '',
+  )
+  const [comparisonRightLabel, setComparisonRightLabel] = useState(
+    data.offlineDevices[1]?.label ?? data.offlineDevices[0]?.label ?? '',
+  )
+  const [comparisonResult, setComparisonResult] = useState<ComparisonItem | null>(null)
+  const [comparisonLoading, setComparisonLoading] = useState(false)
+  const [comparisonError, setComparisonError] = useState<string | null>(null)
   const [modalTarget, setModalTarget] = useState<DeviceEntry | JoiningDevice | HistoryRecord | null>(
     null,
   )
@@ -70,6 +79,38 @@ function App() {
   useEffect(() => {
     loadReferenceFingerprintRef.current = loadReferenceFingerprintByIeee
   }, [loadReferenceFingerprintByIeee])
+
+  useEffect(() => {
+    if (data.offlineDevices.length === 0) {
+      return
+    }
+
+    setComparisonLeftLabel((previous) =>
+      data.offlineDevices.some((item) => item.label === previous) ? previous : data.offlineDevices[0]?.label ?? '',
+    )
+    setComparisonRightLabel((previous) => {
+      if (data.offlineDevices.some((item) => item.label === previous)) {
+        return previous
+      }
+
+      return (
+        data.offlineDevices.find((item) => item.label !== (data.offlineDevices[0]?.label ?? ''))?.label ??
+        data.offlineDevices[0]?.label ??
+        ''
+      )
+    })
+  }, [data.offlineDevices])
+
+  useEffect(() => {
+    if (
+      comparisonResult &&
+      (comparisonResult.leftLabel !== comparisonLeftLabel || comparisonResult.rightLabel !== comparisonRightLabel)
+    ) {
+      setComparisonResult(null)
+    }
+
+    setComparisonError(null)
+  }, [comparisonLeftLabel, comparisonRightLabel])
 
   useEffect(() => {
     if (!modalTarget) {
@@ -129,6 +170,12 @@ function App() {
     data.offlineDevices.find((item) => item.label === selectedOfflineLabel) ??
     filteredOfflineDevices[0] ??
     data.offlineDevices[0]
+  const comparisonLeftDevice = data.offlineDevices.find((item) => item.label === comparisonLeftLabel)
+  const comparisonRightDevice = data.offlineDevices.find((item) => item.label === comparisonRightLabel)
+  const comparisonSelectedCount = countDistinctSelections(comparisonLeftLabel, comparisonRightLabel)
+  const comparisonSimilarity = comparisonResult
+    ? calculateFingerprintSimilarity(comparisonResult.leftFingerprint, comparisonResult.rightFingerprint)
+    : null
   const selectedOfflineHeatmaps = liveEnabled
     ? selectedOfflineFingerprint ?? []
     : selectedOffline?.fingerprint ?? []
@@ -179,6 +226,75 @@ function App() {
     modalRequestRef.current += 1
     setModalLoading(false)
     setModalTarget(null)
+  }
+
+  const handleCreateComparison = () => {
+    if (!data.offlineDevices.length) {
+      return
+    }
+
+    const leftLabel = selectedOffline?.label ?? data.offlineDevices[0]?.label ?? ''
+    const rightLabel =
+      data.offlineDevices.find((item) => item.label !== leftLabel)?.label ?? data.offlineDevices[0]?.label ?? ''
+
+    setComparisonLeftLabel(leftLabel)
+    setComparisonRightLabel(rightLabel)
+    setComparisonResult(null)
+    setComparisonError(null)
+  }
+
+  const handleRunComparison = async () => {
+    if (!comparisonLeftDevice || !comparisonRightDevice) {
+      setComparisonError('请选择两台已知设备')
+      setComparisonResult(null)
+      return
+    }
+
+    if (comparisonLeftDevice.label === comparisonRightDevice.label) {
+      setComparisonError('请选择两台不同的设备进行比对')
+      setComparisonResult(null)
+      return
+    }
+
+    setComparisonLoading(true)
+    setComparisonError(null)
+
+    try {
+      const [leftFingerprint, rightFingerprint] = liveEnabled
+        ? await Promise.all([
+            loadReferenceFingerprintByIeee(comparisonLeftDevice.ieeeAddr, undefined, true),
+            loadReferenceFingerprintByIeee(comparisonRightDevice.ieeeAddr, undefined, true),
+          ])
+        : [comparisonLeftDevice.fingerprint, comparisonRightDevice.fingerprint]
+
+      if (!leftFingerprint?.length || !rightFingerprint?.length) {
+        setComparisonResult(null)
+        setComparisonError('有设备未返回可用的参考指纹图')
+        return
+      }
+
+      setComparisonResult({
+        leftLabel: comparisonLeftDevice.label,
+        leftIeeeAddr: comparisonLeftDevice.ieeeAddr,
+        leftFingerprint,
+        rightLabel: comparisonRightDevice.label,
+        rightIeeeAddr: comparisonRightDevice.ieeeAddr,
+        rightFingerprint,
+      })
+    } catch {
+      setComparisonResult(null)
+      setComparisonError('指纹比对失败')
+    } finally {
+      setComparisonLoading(false)
+    }
+  }
+
+  const handleExportComparison = () => {
+    if (!comparisonResult) {
+      return
+    }
+
+    exportComparisonSnapshot(comparisonResult, comparisonSimilarity)
   }
 
   return (
@@ -248,10 +364,22 @@ function App() {
             items={filteredOfflineDevices}
             selected={selectedOffline}
             selectedFingerprint={selectedOfflineHeatmaps}
-            comparison={data.comparison}
+            comparisonDevices={data.offlineDevices}
+            comparisonLeftLabel={comparisonLeftLabel}
+            comparisonRightLabel={comparisonRightLabel}
+            comparisonSelectedCount={comparisonSelectedCount}
+            comparisonResult={comparisonResult}
+            comparisonLoading={comparisonLoading}
+            comparisonError={comparisonError}
+            comparisonSimilarity={comparisonSimilarity}
             query={query}
             onQueryChange={setQuery}
             onSelect={setSelectedOfflineLabel}
+            onCreateComparison={handleCreateComparison}
+            onChangeComparisonLeft={setComparisonLeftLabel}
+            onChangeComparisonRight={setComparisonRightLabel}
+            onRunComparison={handleRunComparison}
+            onExportComparison={handleExportComparison}
           />
         )}
       </main>
@@ -540,18 +668,42 @@ function OfflineView({
   items,
   selected,
   selectedFingerprint,
-  comparison,
+  comparisonDevices,
+  comparisonLeftLabel,
+  comparisonRightLabel,
+  comparisonSelectedCount,
+  comparisonResult,
+  comparisonLoading,
+  comparisonError,
+  comparisonSimilarity,
   query,
   onQueryChange,
   onSelect,
+  onCreateComparison,
+  onChangeComparisonLeft,
+  onChangeComparisonRight,
+  onRunComparison,
+  onExportComparison,
 }: {
   items: OfflineDevice[]
   selected?: OfflineDevice
   selectedFingerprint: FingerprintMatrix[]
-  comparison: ComparisonItem[]
+  comparisonDevices: OfflineDevice[]
+  comparisonLeftLabel: string
+  comparisonRightLabel: string
+  comparisonSelectedCount: number
+  comparisonResult: ComparisonItem | null
+  comparisonLoading: boolean
+  comparisonError: string | null
+  comparisonSimilarity: number | null
   query: string
   onQueryChange: (value: string) => void
   onSelect: (label: string) => void
+  onCreateComparison: () => void
+  onChangeComparisonLeft: (value: string) => void
+  onChangeComparisonRight: (value: string) => void
+  onRunComparison: () => void
+  onExportComparison: () => void
 }) {
   return (
     <>
@@ -562,7 +714,11 @@ function OfflineView({
         </div>
 
         <div className="header-actions">
-          <GradientButton icon={<Plus size={14} strokeWidth={1.8} />} label="新建比对" />
+          <GradientButton
+            icon={<Plus size={14} strokeWidth={1.8} />}
+            label="新建比对"
+            onClick={onCreateComparison}
+          />
         </div>
       </header>
 
@@ -635,27 +791,82 @@ function OfflineView({
           <div className="panel-title-group spread">
             <div className="panel-title-group">
               <PanelTitle icon={<GitCompare size={16} strokeWidth={1.8} />} title="多设备指纹比对" />
-              <span className="compare-badge">已选择 2 台设备</span>
+              <span className="compare-badge">已选择 {comparisonSelectedCount} 台设备</span>
             </div>
             <div className="compare-actions">
-              <MutedButton icon={<RefreshCw size={14} strokeWidth={1.8} />} label="开始比对" disabled />
-              <MutedButton icon={<Archive size={14} strokeWidth={1.8} />} label="导出结果" disabled />
+              <MutedButton
+                icon={<RefreshCw size={14} strokeWidth={1.8} />}
+                label={comparisonLoading ? '比对中…' : '开始比对'}
+                onClick={onRunComparison}
+                disabled={comparisonLoading || comparisonSelectedCount < 2}
+              />
+              <MutedButton
+                icon={<Archive size={14} strokeWidth={1.8} />}
+                label="导出结果"
+                onClick={onExportComparison}
+                disabled={!comparisonResult}
+              />
             </div>
           </div>
         }
       >
-        {comparison[0] ? (
+        <div className="comparison-toolbar">
+          <label className="compare-field">
+            <span>左侧设备</span>
+            <select
+              className="compare-select"
+              value={comparisonLeftLabel}
+              onChange={(event) => onChangeComparisonLeft(event.target.value)}
+            >
+              {comparisonDevices.map((device) => (
+                <option key={`left-${device.label}`} value={device.label}>
+                  {device.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="compare-field">
+            <span>右侧设备</span>
+            <select
+              className="compare-select"
+              value={comparisonRightLabel}
+              onChange={(event) => onChangeComparisonRight(event.target.value)}
+            >
+              {comparisonDevices.map((device) => (
+                <option key={`right-${device.label}`} value={device.label}>
+                  {device.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <div className="compare-meta">
+            <span className={comparisonSimilarity !== null ? 'compare-score active' : 'compare-score'}>
+              {comparisonSimilarity !== null ? `相似度 ${comparisonSimilarity}%` : '等待比对结果'}
+            </span>
+            {comparisonError ? <span className="compare-error">{comparisonError}</span> : null}
+          </div>
+        </div>
+
+        {comparisonLoading ? (
+          <div className="empty-shell">正在加载参考指纹图…</div>
+        ) : comparisonResult ? (
           <div className="comparison-grid">
             <article className="comparison-card">
               <div className="comparison-card-head">
                 <div>
-                  <strong>{comparison[0].leftLabel}</strong>
-                  <span>{comparison[0].leftIeeeAddr}</span>
+                  <strong>{comparisonResult.leftLabel}</strong>
+                  <span>{comparisonResult.leftIeeeAddr}</span>
                 </div>
               </div>
               <div className="comparison-heatmaps">
-                {comparison[0].leftFingerprint.map((matrix) => (
-                  <HeatmapCard key={`${comparison[0].leftLabel}-${matrix.title}`} matrix={matrix} compact={false} />
+                {comparisonResult.leftFingerprint.map((matrix) => (
+                  <HeatmapCard
+                    key={`${comparisonResult.leftLabel}-${matrix.title}`}
+                    matrix={matrix}
+                    compact={false}
+                  />
                 ))}
               </div>
             </article>
@@ -663,19 +874,23 @@ function OfflineView({
             <article className="comparison-card reverse-radius">
               <div className="comparison-card-head">
                 <div>
-                  <strong>{comparison[0].rightLabel}</strong>
-                  <span>{comparison[0].rightIeeeAddr}</span>
+                  <strong>{comparisonResult.rightLabel}</strong>
+                  <span>{comparisonResult.rightIeeeAddr}</span>
                 </div>
               </div>
               <div className="comparison-heatmaps">
-                {comparison[0].rightFingerprint.map((matrix) => (
-                  <HeatmapCard key={`${comparison[0].rightLabel}-${matrix.title}`} matrix={matrix} compact={false} />
+                {comparisonResult.rightFingerprint.map((matrix) => (
+                  <HeatmapCard
+                    key={`${comparisonResult.rightLabel}-${matrix.title}`}
+                    matrix={matrix}
+                    compact={false}
+                  />
                 ))}
               </div>
             </article>
           </div>
         ) : (
-          <div className="empty-shell">暂无可比对设备</div>
+          <div className="empty-shell">请选择两台设备并开始比对</div>
         )}
       </CardPanel>
     </>
@@ -858,9 +1073,17 @@ function InfoBox({ icon, text }: { icon: ReactNode; text: string }) {
   )
 }
 
-function GradientButton({ icon, label }: { icon: ReactNode; label: string }) {
+function GradientButton({
+  icon,
+  label,
+  onClick,
+}: {
+  icon: ReactNode
+  label: string
+  onClick?: () => void
+}) {
   return (
-    <button type="button" className="gradient-button">
+    <button type="button" className="gradient-button" onClick={onClick}>
       {icon}
       <span>{label}</span>
     </button>
@@ -1197,6 +1420,66 @@ function formatDateTime(date: Date) {
 
 function formatChannelValue(channel: number) {
   return channel > 0 ? `Channel ${channel}` : '--'
+}
+
+function countDistinctSelections(leftLabel: string, rightLabel: string) {
+  return new Set([leftLabel, rightLabel].filter((value) => value.trim().length > 0)).size
+}
+
+function calculateFingerprintSimilarity(left: FingerprintMatrix[], right: FingerprintMatrix[]) {
+  const pairs = Math.min(left.length, right.length)
+  if (pairs === 0) {
+    return 0
+  }
+
+  let similarityTotal = 0
+
+  for (let index = 0; index < pairs; index += 1) {
+    similarityTotal += calculateMatrixSimilarity(left[index], right[index])
+  }
+
+  return Math.round((similarityTotal / pairs) * 10) / 10
+}
+
+function calculateMatrixSimilarity(left: FingerprintMatrix, right: FingerprintMatrix) {
+  const pointCount = Math.min(left.points.length, right.points.length)
+  if (pointCount === 0) {
+    return 0
+  }
+
+  const leftRange = Math.max(Math.abs(left.min), Math.abs(left.max), 1e-6)
+  const rightRange = Math.max(Math.abs(right.min), Math.abs(right.max), 1e-6)
+  let deltaTotal = 0
+
+  for (let index = 0; index < pointCount; index += 1) {
+    const leftValue = left.points[index]?.[2] ?? 0
+    const rightValue = right.points[index]?.[2] ?? 0
+    const normalizedLeft = leftValue / leftRange
+    const normalizedRight = rightValue / rightRange
+    deltaTotal += Math.abs(normalizedLeft - normalizedRight) / 2
+  }
+
+  const averageDelta = deltaTotal / pointCount
+  const similarity = Math.max(0, Math.min(1, 1 - averageDelta))
+  return similarity * 100
+}
+
+function exportComparisonSnapshot(comparison: ComparisonItem, similarity: number | null) {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    similarity,
+    comparison,
+  }
+
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {
+    type: 'application/json;charset=utf-8',
+  })
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = `${comparison.leftLabel}-vs-${comparison.rightLabel}.json`
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 export default App
