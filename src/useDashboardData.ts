@@ -16,6 +16,9 @@ const LIVE_ENABLED = import.meta.env.VITE_ENABLE_LIVE !== 'false'
 const COORDINATOR_HTTP_BASE = trimTrailingSlash(
   import.meta.env.VITE_COORDINATOR_HTTP_BASE ?? 'http://127.0.0.1:8787',
 )
+const FINGERPRINT_HTTP_BASE = trimTrailingSlash(
+  import.meta.env.VITE_FINGERPRINT_HTTP_BASE ?? 'http://127.0.0.1:8788',
+)
 const POLL_INTERVAL_MS = clampPollInterval(
   Number(import.meta.env.VITE_COORDINATOR_POLL_INTERVAL_MS ?? 3000),
 )
@@ -136,6 +139,12 @@ interface AdmissionDetailResponse extends AdmissionSummary {
   } | null
 }
 
+interface ReferenceFingerprintResponse {
+  ieee_addr?: string
+  shape?: number[]
+  channels?: number[][][]
+}
+
 interface DashboardConnectionState {
   mode: 'mock' | 'live'
   coordinatorConnected: boolean
@@ -158,6 +167,8 @@ export function useDashboardData() {
   const admissionCacheRef = useRef(new Map<string, AdmissionDetailResponse>())
   const admissionCacheVersionRef = useRef(new Map<string, string>())
   const admissionRequestRef = useRef(new Map<string, Promise<AdmissionDetailResponse | null>>())
+  const referenceFingerprintCacheRef = useRef(new Map<string, FingerprintMatrix[] | null>())
+  const referenceFingerprintRequestRef = useRef(new Map<string, Promise<FingerprintMatrix[] | null>>())
 
   const setError = (message: string) => {
     setConnection((previous) => ({
@@ -211,22 +222,88 @@ export function useDashboardData() {
     return request
   }
 
+  const loadReferenceFingerprintByIeee = async (
+    ieeeAddr: string,
+    signal?: AbortSignal,
+    force = false,
+  ) => {
+    const normalizedIeeeAddr = ieeeAddr.trim()
+    if (!LIVE_ENABLED || !normalizedIeeeAddr || normalizedIeeeAddr === '--') {
+      return null
+    }
+
+    const cache = referenceFingerprintCacheRef.current
+    if (!force && cache.has(normalizedIeeeAddr)) {
+      return cache.get(normalizedIeeeAddr) ?? null
+    }
+
+    const pending = referenceFingerprintRequestRef.current.get(normalizedIeeeAddr)
+    if (pending) {
+      return pending
+    }
+
+    const request = (async () => {
+      try {
+        const response = await fetchJson<ReferenceFingerprintResponse>(
+          `${FINGERPRINT_HTTP_BASE}/api/v1/fingerprint/reference`,
+          signal,
+          force ? 'no-store' : 'default',
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              ieee_addr: normalizedIeeeAddr,
+            }),
+          },
+        )
+        const reference = buildReferenceHeatmaps(response)
+        cache.set(normalizedIeeeAddr, reference)
+        return reference
+      } catch (error) {
+        if (error instanceof HttpError && error.status === 404) {
+          cache.set(normalizedIeeeAddr, null)
+          return null
+        }
+
+        if (!signal?.aborted) {
+          setError(
+            error instanceof Error ? `参考指纹图加载失败: ${error.message}` : '参考指纹图加载失败',
+          )
+        }
+        return cache.get(normalizedIeeeAddr) ?? null
+      } finally {
+        referenceFingerprintRequestRef.current.delete(normalizedIeeeAddr)
+      }
+    })()
+
+    referenceFingerprintRequestRef.current.set(normalizedIeeeAddr, request)
+    return request
+  }
+
   const loadAdmissionTarget = async (target: ModalTarget) => {
     if (!LIVE_ENABLED) {
       return target
     }
 
+    let nextTarget = target
     const admissionId = getTargetAdmissionId(target)
-    if (!admissionId) {
-      return target
+    if (admissionId) {
+      const detail = await loadAdmissionDetailById(admissionId, '', undefined, true)
+      if (detail) {
+        nextTarget = hydrateTargetWithAdmissionDetail(nextTarget, detail)
+      }
     }
 
-    const detail = await loadAdmissionDetailById(admissionId, '', undefined, true)
-    if (!detail) {
-      return target
+    const referenceIeeeAddr = resolveReferenceFingerprintIeeeAddr(nextTarget, data.offlineDevices)
+    if (!referenceIeeeAddr) {
+      return nextTarget
     }
 
-    return hydrateTargetWithAdmissionDetail(target, detail)
+    const reference = await loadReferenceFingerprintByIeee(referenceIeeeAddr)
+    return reference?.length ? hydrateTargetWithReferenceFingerprint(nextTarget, reference) : nextTarget
   }
 
   useEffect(() => {
@@ -342,7 +419,13 @@ export function useDashboardData() {
     }
   }, [])
 
-  return { data, connection, liveEnabled: LIVE_ENABLED, loadAdmissionTarget }
+  return {
+    data,
+    connection,
+    liveEnabled: LIVE_ENABLED,
+    loadAdmissionTarget,
+    loadReferenceFingerprintByIeee,
+  }
 }
 
 function getTargetAdmissionId(target: ModalTarget) {
@@ -392,6 +475,19 @@ function hydrateTargetWithAdmissionDetail(target: ModalTarget, detail: Admission
   }
 }
 
+function hydrateTargetWithReferenceFingerprint(
+  target: ModalTarget,
+  reference: FingerprintMatrix[],
+): ModalTarget {
+  return {
+    ...target,
+    fingerprint: {
+      ...target.fingerprint,
+      reference,
+    },
+  }
+}
+
 function pruneAdmissionCache(
   admissionCache: Map<string, AdmissionDetailResponse>,
   admissionCacheVersion: Map<string, string>,
@@ -406,13 +502,28 @@ function pruneAdmissionCache(
   }
 }
 
-async function fetchJson<T>(url: string, signal?: AbortSignal, cache: RequestCache = 'default') {
+class HttpError extends Error {
+  status: number
+
+  constructor(status: number, statusText: string) {
+    super(`请求失败: ${status} ${statusText}`)
+    this.status = status
+  }
+}
+
+async function fetchJson<T>(
+  url: string,
+  signal?: AbortSignal,
+  cache: RequestCache = 'default',
+  init?: RequestInit,
+) {
   const response = await fetch(url, {
+    ...init,
     signal,
     cache,
   })
   if (!response.ok) {
-    throw new Error(`请求失败: ${response.status} ${response.statusText}`)
+    throw new HttpError(response.status, response.statusText)
   }
 
   return (await response.json()) as T
@@ -684,6 +795,49 @@ function matrixToHeatmap(matrix: number[][], title: string, subtitle: string): F
   }
 }
 
+function buildReferenceHeatmaps(response: ReferenceFingerprintResponse): FingerprintMatrix[] | null {
+  if (response.shape?.[0] !== 2 || response.shape?.[1] !== 256 || response.shape?.[2] !== 256) {
+    return null
+  }
+
+  const channels = response.channels
+  if (!Array.isArray(channels) || channels.length !== 2) {
+    return null
+  }
+
+  const matrices = channels.map((channel, index) => {
+    const normalizedChannel = normalizeReferenceChannel(channel)
+    if (!normalizedChannel) {
+      return null
+    }
+
+    return matrixToHeatmap(
+      normalizedChannel,
+      index === 0 ? '指纹图 A' : '指纹图 B',
+      '参考指纹',
+    )
+  })
+
+  return matrices.every((matrix) => matrix !== null) ? (matrices as FingerprintMatrix[]) : null
+}
+
+function normalizeReferenceChannel(channel: number[][]): number[][] | null {
+  if (!Array.isArray(channel) || channel.length !== 256) {
+    return null
+  }
+
+  const normalizedRows: number[][] = []
+  for (const row of channel) {
+    if (!Array.isArray(row) || row.length !== 256) {
+      return null
+    }
+
+    normalizedRows.push(row.map((value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0)))
+  }
+
+  return normalizedRows
+}
+
 function createEmptyFingerprintBundle(): FingerprintBundle {
   return {
     primary: [],
@@ -866,12 +1020,35 @@ function trimTrailingSlash(value: string) {
   return value.endsWith('/') ? value.slice(0, -1) : value
 }
 
+function resolveReferenceFingerprintIeeeAddr(target: ModalTarget, offlineDevices: OfflineDevice[]) {
+  if ('joinStage' in target) {
+    return findOfflineDeviceByLabel(target.predictedLabel, offlineDevices)?.ieeeAddr ?? null
+  }
+
+  if ('fingerprintId' in target) {
+    return (
+      findOfflineDeviceByLabel(target.fingerprintId, offlineDevices)?.ieeeAddr ??
+      (target.ieeeAddr !== '--' ? target.ieeeAddr : null)
+    )
+  }
+
+  return findOfflineDeviceByLabel(target.matchedLabel, offlineDevices)?.ieeeAddr ?? null
+}
+
 function findReferenceFingerprint(label: string, offlineDevices: OfflineDevice[]) {
   if (!label) {
     return null
   }
 
-  return offlineDevices.find((device) => device.label === label)?.fingerprint ?? null
+  return findOfflineDeviceByLabel(label, offlineDevices)?.fingerprint ?? null
+}
+
+function findOfflineDeviceByLabel(label: string, offlineDevices: OfflineDevice[]) {
+  if (!label) {
+    return null
+  }
+
+  return offlineDevices.find((device) => device.label === label) ?? null
 }
 
 function clampPollInterval(value: number) {

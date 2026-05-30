@@ -49,17 +49,27 @@ import { useDashboardData } from './useDashboardData'
 function App() {
   const [view, setView] = useState<NavigationView>('realtime')
   const [query, setQuery] = useState('')
-  const { data, connection, liveEnabled, loadAdmissionTarget } = useDashboardData()
+  const { data, connection, liveEnabled, loadAdmissionTarget, loadReferenceFingerprintByIeee } =
+    useDashboardData()
   const [selectedOfflineLabel, setSelectedOfflineLabel] = useState(
     data.offlineDevices[0]?.label ?? '',
+  )
+  const [selectedOfflineFingerprint, setSelectedOfflineFingerprint] = useState<FingerprintMatrix[] | null>(
+    null,
   )
   const [modalTarget, setModalTarget] = useState<DeviceEntry | JoiningDevice | HistoryRecord | null>(
     null,
   )
   const [modalLoading, setModalLoading] = useState(false)
   const modalRequestRef = useRef(0)
+  const offlineRequestRef = useRef(0)
+  const loadReferenceFingerprintRef = useRef(loadReferenceFingerprintByIeee)
   const nowLabel = useNowLabel()
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
+
+  useEffect(() => {
+    loadReferenceFingerprintRef.current = loadReferenceFingerprintByIeee
+  }, [loadReferenceFingerprintByIeee])
 
   useEffect(() => {
     if (!modalTarget) {
@@ -119,11 +129,32 @@ function App() {
     data.offlineDevices.find((item) => item.label === selectedOfflineLabel) ??
     filteredOfflineDevices[0] ??
     data.offlineDevices[0]
+  const selectedOfflineHeatmaps = liveEnabled
+    ? selectedOfflineFingerprint ?? []
+    : selectedOffline?.fingerprint ?? []
   const sidebarStatusTone = connection.coordinatorConnected && connection.inferConnected
     ? 'connected'
     : connection.coordinatorConnected || connection.inferConnected
       ? 'partial'
       : 'disconnected'
+
+  useEffect(() => {
+    const requestId = offlineRequestRef.current + 1
+    offlineRequestRef.current = requestId
+    setSelectedOfflineFingerprint(null)
+
+    if (!liveEnabled || !selectedOffline?.ieeeAddr) {
+      return
+    }
+
+    void loadReferenceFingerprintRef.current(selectedOffline.ieeeAddr).then((reference) => {
+      if (offlineRequestRef.current !== requestId) {
+        return
+      }
+
+      setSelectedOfflineFingerprint(reference?.length ? reference : null)
+    })
+  }, [liveEnabled, selectedOffline?.ieeeAddr])
 
   const handleOpenDevice = async (target: DeviceEntry | JoiningDevice | HistoryRecord) => {
     const requestId = modalRequestRef.current + 1
@@ -216,6 +247,7 @@ function App() {
           <OfflineView
             items={filteredOfflineDevices}
             selected={selectedOffline}
+            selectedFingerprint={selectedOfflineHeatmaps}
             comparison={data.comparison}
             query={query}
             onQueryChange={setQuery}
@@ -507,6 +539,7 @@ function RealtimeView({
 function OfflineView({
   items,
   selected,
+  selectedFingerprint,
   comparison,
   query,
   onQueryChange,
@@ -514,6 +547,7 @@ function OfflineView({
 }: {
   items: OfflineDevice[]
   selected?: OfflineDevice
+  selectedFingerprint: FingerprintMatrix[]
   comparison: ComparisonItem[]
   query: string
   onQueryChange: (value: string) => void
@@ -579,11 +613,15 @@ function OfflineView({
                 <strong>{selected.label}</strong>
                 <span>{selected.ieeeAddr}</span>
               </div>
-              <div className="fingerprint-grid">
-                {selected.fingerprint.map((matrix) => (
-                  <HeatmapCard key={matrix.title} matrix={matrix} compact={false} />
-                ))}
-              </div>
+              {selectedFingerprint.length > 0 ? (
+                <div className="fingerprint-grid">
+                  {selectedFingerprint.map((matrix) => (
+                    <HeatmapCard key={matrix.title} matrix={matrix} compact={false} />
+                  ))}
+                </div>
+              ) : (
+                <div className="empty-shell">暂无参考指纹图</div>
+              )}
             </div>
           ) : (
             <div className="empty-shell">暂无离线设备数据</div>
