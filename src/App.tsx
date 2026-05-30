@@ -1,6 +1,8 @@
 import {
+  memo,
   useDeferredValue,
   useEffect,
+  useRef,
   useState,
 } from 'react'
 import type { ReactNode } from 'react'
@@ -47,13 +49,15 @@ import { useDashboardData } from './useDashboardData'
 function App() {
   const [view, setView] = useState<NavigationView>('realtime')
   const [query, setQuery] = useState('')
-  const { data, connection, liveEnabled } = useDashboardData()
+  const { data, connection, liveEnabled, loadAdmissionTarget } = useDashboardData()
   const [selectedOfflineLabel, setSelectedOfflineLabel] = useState(
     data.offlineDevices[0]?.label ?? '',
   )
   const [modalTarget, setModalTarget] = useState<DeviceEntry | JoiningDevice | HistoryRecord | null>(
     null,
   )
+  const [modalLoading, setModalLoading] = useState(false)
+  const modalRequestRef = useRef(0)
   const nowLabel = useNowLabel()
   const deferredQuery = useDeferredValue(query.trim().toLowerCase())
 
@@ -121,6 +125,31 @@ function App() {
       ? 'partial'
       : 'disconnected'
 
+  const handleOpenDevice = async (target: DeviceEntry | JoiningDevice | HistoryRecord) => {
+    const requestId = modalRequestRef.current + 1
+    modalRequestRef.current = requestId
+    setModalTarget(target)
+    setModalLoading(true)
+
+    try {
+      const hydratedTarget = await loadAdmissionTarget(target)
+      if (modalRequestRef.current !== requestId) {
+        return
+      }
+      setModalTarget(hydratedTarget)
+    } finally {
+      if (modalRequestRef.current === requestId) {
+        setModalLoading(false)
+      }
+    }
+  }
+
+  const handleCloseModal = () => {
+    modalRequestRef.current += 1
+    setModalLoading(false)
+    setModalTarget(null)
+  }
+
   return (
     <div className="app-frame">
       <aside className="sidebar">
@@ -163,8 +192,10 @@ function App() {
           <div>
             <strong>{liveEnabled ? '实时联调' : '模拟数据'}</strong>
             <span>
-              协调器 {connection.coordinatorConnected ? 'WS 已连接' : 'WS 未连接'} · 推理{' '}
-              {connection.inferConnected ? 'WS 已连接' : 'WS 未连接'}
+              {connection.lastError ??
+                `协调器 ${connection.coordinatorConnected ? '在线' : '离线'} · 推理 ${
+                  connection.inferConnected ? '模型已就绪' : '模型未就绪'
+                }`}
             </span>
           </div>
         </div>
@@ -179,7 +210,7 @@ function App() {
             nowLabel={nowLabel}
             query={query}
             onQueryChange={setQuery}
-            onOpenDevice={setModalTarget}
+            onOpenDevice={handleOpenDevice}
           />
         ) : (
           <OfflineView
@@ -196,7 +227,8 @@ function App() {
       {modalTarget ? (
         <FingerprintDialog
           target={modalTarget}
-          onClose={() => setModalTarget(null)}
+          loading={modalLoading}
+          onClose={handleCloseModal}
           onExport={() => exportFingerprintSnapshot(modalTarget)}
         />
       ) : null}
@@ -347,7 +379,7 @@ function RealtimeView({
               <PanelTitle icon={<Radio size={16} strokeWidth={1.8} />} title="正在入网设备" />
               <span className="pulse-badge">
                 <span className="pulse-dot" />
-                AI 识别中
+                {getJoiningBadgeText(data.joiningDevice)}
               </span>
             </div>
           }
@@ -383,9 +415,9 @@ function RealtimeView({
                       </div>
                       <strong>神经网络识别</strong>
                     </div>
-                    <span className="decision-state">
+                    <span className={`decision-state ${data.joiningDevice.decision}`}>
                       <span className="decision-state-dot" />
-                      自动判定 · 通过
+                      {getJoiningStateText(data.joiningDevice)}
                     </span>
                   </div>
                   <div className="decision-score-row">
@@ -394,7 +426,7 @@ function RealtimeView({
                   </div>
                   <div className="decision-progress">
                     <div
-                      className="decision-progress-fill"
+                      className={`decision-progress-fill ${data.joiningDevice.decision}`}
                       style={{ width: `${Math.round(data.joiningDevice.confidence * 1000) / 10}%` }}
                     />
                   </div>
@@ -405,11 +437,13 @@ function RealtimeView({
                     </div>
                     <div className="decision-footer-item plain">
                       <span>推理标签</span>
-                      <strong>{data.joiningDevice.predictedLabel}</strong>
+                      <strong>{data.joiningDevice.predictedLabel || '--'}</strong>
                     </div>
                     <div className="decision-footer-item plain">
                       <span>决策</span>
-                      <strong className="decision-allow">允许入网</strong>
+                      <strong className={`decision-${data.joiningDevice.decision}`}>
+                        {data.joiningDevice.decisionText}
+                      </strong>
                     </div>
                   </div>
                 </div>
@@ -612,10 +646,12 @@ function OfflineView({
 
 function FingerprintDialog({
   target,
+  loading,
   onClose,
   onExport,
 }: {
   target: DeviceEntry | JoiningDevice | HistoryRecord
+  loading: boolean
   onClose: () => void
   onExport: () => void
 }) {
@@ -657,8 +693,8 @@ function FingerprintDialog({
           </div>
 
           <div className="modal-columns">
-            <ModalColumn title="待入网设备指纹 · 实时样本" items={target.fingerprint.primary} />
-            <ModalColumn title="指纹库设备对照 · 参考样本" items={target.fingerprint.reference} />
+            <ModalColumn title="待入网设备指纹 · 实时样本" items={target.fingerprint.primary} loading={loading} />
+            <ModalColumn title="指纹库设备对照 · 参考样本" items={target.fingerprint.reference} loading={false} />
           </div>
         </div>
 
@@ -680,9 +716,11 @@ function FingerprintDialog({
 function ModalColumn({
   title,
   items,
+  loading = false,
 }: {
   title: string
   items: FingerprintMatrix[]
+  loading?: boolean
 }) {
   return (
     <div className="modal-column">
@@ -697,7 +735,7 @@ function ModalColumn({
         </div>
       ) : (
         <div className="modal-empty">
-          <EmptyState message="暂无指纹数据" />
+          <EmptyState message={loading ? '正在加载指纹数据…' : '暂无指纹数据'} />
         </div>
       )}
     </div>
@@ -819,7 +857,13 @@ function PanelTitle({ icon, title }: { icon: ReactNode; title: string }) {
   )
 }
 
-function HeatmapCard({ matrix, compact }: { matrix: FingerprintMatrix; compact: boolean }) {
+const HeatmapCard = memo(function HeatmapCard({
+  matrix,
+  compact,
+}: {
+  matrix: FingerprintMatrix
+  compact: boolean
+}) {
   return (
     <article className="heatmap-card">
       <div className="heatmap-card-title">
@@ -831,7 +875,7 @@ function HeatmapCard({ matrix, compact }: { matrix: FingerprintMatrix; compact: 
       </div>
     </article>
   )
-}
+})
 
 function EmptyState({ message }: { message: string }) {
   return <div className="empty-shell">{message}</div>
@@ -870,7 +914,7 @@ function createDialogMetrics(target: DeviceEntry | JoiningDevice | HistoryRecord
     ['长地址', target.ieeeAddr],
     ['短地址', target.shortAddr],
     ['设备类型', target.role],
-    ['识别结果', target.predictedLabel],
+    ['识别结果', target.predictedLabel || target.decisionText],
   ] as const
 }
 
@@ -879,7 +923,19 @@ function hasJoiningIdentity(target: JoiningDevice) {
 }
 
 function hasJoiningPrediction(target: JoiningDevice) {
-  return target.predictedLabel.trim().length > 0 || target.confidence > 0
+  return target.predictedLabel.trim().length > 0 || target.confidence > 0 || target.decision !== 'pending'
+}
+
+function getJoiningStateText(target: JoiningDevice) {
+  return `自动判定 · ${target.decision === 'allow' ? '通过' : target.decision === 'deny' ? '拒绝' : '待判定'}`
+}
+
+function getJoiningBadgeText(target: JoiningDevice) {
+  return target.decision === 'allow'
+    ? 'AI 已放行'
+    : target.decision === 'deny'
+      ? 'AI 已拒绝'
+      : 'AI 识别中'
 }
 
 function hasIqSamples(target: JoiningDevice) {
@@ -989,6 +1045,8 @@ function buildIqChartOption(device: JoiningDevice): EChartsCoreOption {
 }
 
 function buildHeatmapOption(matrix: FingerprintMatrix, compact: boolean): EChartsCoreOption {
+  const extent = Math.max(Math.abs(matrix.min), Math.abs(matrix.max), 1e-6)
+
   return {
     animationDuration: 350,
     grid: {
@@ -1006,10 +1064,14 @@ function buildHeatmapOption(matrix: FingerprintMatrix, compact: boolean): EChart
           textStyle: {
             color: '#dce6f7',
           },
+          formatter: (params: { value?: [number, number, number] }) => {
+            const [x, y, value] = params.value ?? [0, 0, 0]
+            return `x=${x}<br/>y=${y}<br/>value=${Number(value).toFixed(4)}`
+          },
         },
     visualMap: {
-      min: 0,
-      max: matrix.max,
+      min: -extent,
+      max: extent,
       orient: 'horizontal',
       left: 'center',
       top: 0,
@@ -1021,7 +1083,7 @@ function buildHeatmapOption(matrix: FingerprintMatrix, compact: boolean): EChart
         fontSize: compact ? 0 : 10,
       },
       inRange: {
-        color: ['#09101c', '#0f2c4b', '#155e75', '#22d3ee', '#f59e0b'],
+        color: ['#12304a', '#1d4f73', '#d8e1ec', '#d97706', '#7c2d12'],
       },
     },
     xAxis: {

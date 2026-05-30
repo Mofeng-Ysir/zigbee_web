@@ -177,6 +177,7 @@ function createDeviceEntry(
     signalScore: 72 + index * 5,
     matchedConfidence: roundTo(0.81 + index * 0.035, 2),
     parentShort: index === 0 ? '0x0000' : '0x4A28',
+    admissionId: null,
     fingerprint: createFingerprintBundle(entry.seed, entry.label),
   }
 }
@@ -184,6 +185,7 @@ function createDeviceEntry(
 function createJoiningDevice(tick: number): JoiningDevice {
   const entry = DEVICE_CATALOG[tick % DEVICE_CATALOG.length]
   const confidence = roundTo(0.88 + (tick % 4) * 0.02, 2)
+  const decision: DeviceDecision = tick % 4 === 3 ? 'deny' : tick % 4 === 2 ? 'allow' : 'pending'
 
   return {
     ieeeAddr: entry.ieeeAddr,
@@ -194,6 +196,10 @@ function createJoiningDevice(tick: number): JoiningDevice {
     predictedLabel: entry.label,
     confidence,
     signalScore: 78 + ((tick + 1) % 5) * 4,
+    decision,
+    decisionText: decision === 'allow' ? '允许入网' : decision === 'deny' ? '拒绝入网' : '待判定',
+    reason: decision === 'deny' ? 'predicted_unknown' : decision === 'allow' ? 'recognized_known_label' : 'matching',
+    admissionId: null,
     iqSamples: createIqSamples(entry.seed + tick),
     fingerprint: createFingerprintBundle(entry.seed + tick, entry.label),
   }
@@ -231,6 +237,7 @@ function buildHistory(tick: number): HistoryRecord[] {
       matchedLabel: entry.label,
       timestamp: isoOffset(tick * 5 + index * 9),
       latencyMs: 118 + ((tick + index) % 5) * 27,
+      admissionId: null,
       reason:
         decision === 'allow'
           ? 'match_known_device'
@@ -313,6 +320,7 @@ function createHeatmap(key: string, seed: number, title: string): FingerprintMat
   return {
     title,
     subtitle: key.replaceAll('-', ' · '),
+    min: 0,
     max: 100,
     points,
   }

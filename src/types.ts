@@ -7,6 +7,7 @@ export type DeviceStatus = 'allowed' | 'pending' | 'denied' | 'offline'
 export interface FingerprintMatrix {
   title: string
   subtitle: string
+  min: number
   max: number
   points: Array<[number, number, number]>
 }
@@ -41,6 +42,7 @@ export interface DeviceEntry {
   signalScore: number
   matchedConfidence: number
   parentShort: string
+  admissionId: string | null
   fingerprint: FingerprintBundle
 }
 
@@ -53,6 +55,10 @@ export interface JoiningDevice {
   predictedLabel: string
   confidence: number
   signalScore: number
+  decision: DeviceDecision
+  decisionText: string
+  reason: string
+  admissionId: string | null
   iqSamples: {
     real: number[]
     imag: number[]
@@ -61,7 +67,8 @@ export interface JoiningDevice {
 }
 
 export interface HistoryRecord {
-  id: number
+  id: string | number
+  admissionId: string | null
   ieeeAddr: string
   shortAddr: string
   decision: DeviceDecision
