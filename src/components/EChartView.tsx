@@ -1,11 +1,21 @@
 import { useEffect, useRef } from 'react'
 import colormap from 'colormap'
-import { LineChart } from 'echarts/charts'
-import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
+import { BarChart, LineChart, RadarChart, ScatterChart } from 'echarts/charts'
+import { GridComponent, LegendComponent, RadarComponent, TooltipComponent } from 'echarts/components'
 import { init, use as registerCharts, type EChartsCoreOption, type EChartsType } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 
-registerCharts([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer])
+registerCharts([
+  LineChart,
+  ScatterChart,
+  BarChart,
+  RadarChart,
+  GridComponent,
+  TooltipComponent,
+  LegendComponent,
+  RadarComponent,
+  CanvasRenderer,
+])
 
 type HeatmapPoint = [number, number, number]
 
