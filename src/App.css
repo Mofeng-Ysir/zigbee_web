@@ -285,6 +285,10 @@
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.stat-row.stat-row-compact {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .stat-card,
 .panel,
 .comparison-card,
@@ -372,6 +376,16 @@
 .row-mid {
   grid-template-columns: 1fr 1fr;
   min-height: 320px;
+}
+
+.row-device {
+  grid-template-columns: 1fr;
+  min-height: 280px;
+}
+
+.row-iq {
+  grid-template-columns: 1fr;
+  min-height: 640px;
 }
 
 .row-bottom {
@@ -606,9 +620,9 @@
   flex: 1;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1.3fr) minmax(230px, 0.9fr);
-  gap: 12px;
-  padding: 12px;
+  grid-template-columns: minmax(0, 1.7fr) minmax(360px, 1fr);
+  gap: 14px;
+  padding: 14px;
 }
 
 .iq-stage,
@@ -687,7 +701,7 @@
 
 .iq-stage-chart {
   flex: 1;
-  min-height: 210px;
+  min-height: 430px;
   padding-top: 10px;
   background: transparent;
 }
@@ -696,6 +710,7 @@
   min-height: 0;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
   gap: 12px;
 }
 
@@ -720,7 +735,7 @@
 
 .iq-preview-chart {
   flex: 1;
-  min-height: 112px;
+  min-height: 124px;
   border-radius: 8px 0 8px 0;
   overflow: hidden;
   background: #131c2e;
@@ -1449,6 +1464,10 @@
     grid-template-columns: 1fr 1fr;
   }
 
+  .stat-row.stat-row-compact {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .row-bottom {
     grid-template-columns: 1fr;
   }
@@ -1495,6 +1514,7 @@
   }
 
   .stat-row,
+  .stat-row.stat-row-compact,
   .row-mid,
   .row-offline-top,
   .comparison-grid,

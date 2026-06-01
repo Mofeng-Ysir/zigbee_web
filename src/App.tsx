@@ -15,7 +15,6 @@ import {
   Brain,
   ChevronRight,
   Clock3,
-  Cpu,
   Fingerprint,
   GitCompare,
   Grid2x2,
@@ -46,7 +45,15 @@ import type {
 } from './types'
 import { useDashboardData } from './useDashboardData'
 
-type IqChartKey = 'waveform' | 'constellation' | 'envelope' | 'spectrum' | 'radar'
+type IqChartKey =
+  | 'waveform'
+  | 'constellation'
+  | 'envelope'
+  | 'spectrum'
+  | 'autocorrelation'
+  | 'histogram'
+  | 'phaseCloud'
+  | 'radar'
 
 interface IqChartCard {
   key: IqChartKey
@@ -64,8 +71,13 @@ interface IqAnalysis {
   pairs: Array<[number, number]>
   amplitude: number[]
   phase: number[]
+  phaseCloud: Array<[number, number]>
   spectrumLabels: string[]
   spectrumValues: number[]
+  histogramLabels: string[]
+  histogramValues: number[]
+  autocorrelationLabels: string[]
+  autocorrelationValues: number[]
   rmsReal: number
   rmsImag: number
   meanAmplitude: number
@@ -76,6 +88,8 @@ interface IqAnalysis {
   stabilityScore: number
   spectralFocus: number
   dominantSpectrumIndex: number
+  dominantHistogramIndex: number
+  autocorrelationPeak: number
 }
 
 function App() {
@@ -470,15 +484,7 @@ function RealtimeView({
         </div>
       </header>
 
-      <section className="stat-row">
-        <StatCard
-          label="协调器 MAC"
-          value={data.coordinator.ieeeAddr}
-          detail="Coordinator IEEE"
-          tone="cyan"
-          icon={<Cpu size={14} strokeWidth={1.8} />}
-          compact
-        />
+      <section className="stat-row stat-row-compact">
         <StatCard
           label="PAN ID"
           value={data.coordinator.panId}
@@ -503,7 +509,7 @@ function RealtimeView({
         />
       </section>
 
-      <section className="row row-mid">
+      <section className="row row-device">
         <CardPanel
           className="device-panel"
           title={
@@ -540,7 +546,9 @@ function RealtimeView({
             <EmptyState message="暂无网络设备数据" />
           )}
         </CardPanel>
+      </section>
 
+      <section className="row row-iq">
         <CardPanel
           className="iq-panel reverse-radius"
           title={<PanelTitle icon={<Activity size={16} strokeWidth={1.8} />} title="网络 IQ 数据" />}
@@ -1296,6 +1304,7 @@ function buildIqChartCards(device: JoiningDevice): IqChartCard[] {
   const analysis = analyzeIqSamples(device)
   const confidenceLabel = `${Math.round(device.confidence * 1000) / 10}%`
   const dominantSpectrumLabel = analysis.spectrumLabels[analysis.dominantSpectrumIndex] ?? 'B01'
+  const dominantHistogramLabel = analysis.histogramLabels[analysis.dominantHistogramIndex] ?? 'H1'
 
   return [
     {
@@ -1349,6 +1358,45 @@ function buildIqChartCards(device: JoiningDevice): IqChartCard[] {
       ],
       option: buildIqSpectrumOption(analysis),
       previewOption: buildIqSpectrumOption(analysis, true),
+    },
+    {
+      key: 'autocorrelation',
+      label: '自相关',
+      title: '时域自相关曲线',
+      description: '观察 IQ 序列在不同时延下的相关性，适合看周期结构与短时重复。',
+      highlights: [
+        `次峰 ${formatIqNumber(analysis.autocorrelationPeak, 2)}`,
+        `主瓣 ${dominantSpectrumLabel}`,
+        `稳定度 ${Math.round(analysis.stabilityScore)}%`,
+      ],
+      option: buildIqAutocorrelationOption(analysis),
+      previewOption: buildIqAutocorrelationOption(analysis, true),
+    },
+    {
+      key: 'histogram',
+      label: '幅度直方图',
+      title: '包络幅度分布',
+      description: '查看实时样本的能量集中区间，便于对比设备发射包络的离散程度。',
+      highlights: [
+        `密集区 ${dominantHistogramLabel}`,
+        `均幅 ${formatIqNumber(analysis.meanAmplitude)}`,
+        `峰值 ${formatIqNumber(analysis.peakAmplitude)}`,
+      ],
+      option: buildIqHistogramOption(analysis),
+      previewOption: buildIqHistogramOption(analysis, true),
+    },
+    {
+      key: 'phaseCloud',
+      label: '相位云图',
+      title: '相位-幅度云图',
+      description: '将瞬时相位与包络幅度投影到散点平面，辅助识别旋转与幅度耦合关系。',
+      highlights: [
+        `相位跨度 ${Math.round(analysis.phaseSpan)}°`,
+        `平衡 ${Math.round(analysis.balanceScore)}%`,
+        `信号 ${device.signalScore}`,
+      ],
+      option: buildIqPhaseCloudOption(analysis),
+      previewOption: buildIqPhaseCloudOption(analysis, true),
     },
     {
       key: 'radar',
@@ -1723,6 +1771,223 @@ function buildIqSpectrumOption(analysis: IqAnalysis, compact = false): EChartsCo
   }
 }
 
+function buildIqAutocorrelationOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 24,
+      bottom: compact ? 10 : 20,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: analysis.autocorrelationLabels,
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+    },
+    yAxis: {
+      type: 'value',
+      min: -1,
+      max: 1,
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.65)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'line',
+        smooth: !compact,
+        showSymbol: false,
+        lineStyle: {
+          width: compact ? 1.4 : 2,
+          color: '#34d399',
+        },
+        areaStyle: compact ? undefined : { color: 'rgba(52, 211, 153, 0.12)' },
+        data: analysis.autocorrelationValues,
+      },
+    ],
+  }
+}
+
+function buildIqHistogramOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 24,
+      bottom: compact ? 10 : 20,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          axisPointer: {
+            type: 'shadow',
+          },
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'category',
+      data: analysis.histogramLabels,
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+    },
+    yAxis: {
+      type: 'value',
+      max: 100,
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+        formatter: '{value}%',
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.65)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'bar',
+        barWidth: compact ? '54%' : '64%',
+        itemStyle: {
+          color: '#f59e0b',
+          borderRadius: [4, 4, 0, 0],
+        },
+        data: analysis.histogramValues,
+      },
+    ],
+  }
+}
+
+function buildIqPhaseCloudOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 16,
+      right: compact ? 8 : 16,
+      top: compact ? 10 : 22,
+      bottom: compact ? 10 : 22,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'item',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'value',
+      min: -180,
+      max: 180,
+      name: compact ? '' : '相位',
+      nameTextStyle: {
+        color: '#7d90af',
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+        formatter: '{value}°',
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.45)',
+        },
+      },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      max: Math.max(1.2, Math.ceil(analysis.peakAmplitude * 10) / 10),
+      name: compact ? '' : '幅度',
+      nameTextStyle: {
+        color: '#7d90af',
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.45)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'scatter',
+        symbolSize: compact ? 4 : 6,
+        itemStyle: {
+          color: '#c084fc',
+          opacity: compact ? 0.75 : 0.85,
+          shadowBlur: compact ? 0 : 8,
+          shadowColor: 'rgba(192, 132, 252, 0.22)',
+        },
+        data: analysis.phaseCloud,
+      },
+    ],
+  }
+}
+
 function buildIqRadarOption(
   device: JoiningDevice,
   analysis: IqAnalysis,
@@ -1812,6 +2077,7 @@ function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
   const pairs: Array<[number, number]> = []
   const amplitude: number[] = []
   const phase: number[] = []
+  const phaseCloud: Array<[number, number]> = []
   let realEnergy = 0
   let imagEnergy = 0
   let amplitudeTotal = 0
@@ -1825,11 +2091,14 @@ function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
     const imag = device.iqSamples.imag[index] ?? 0
     const magnitude = Math.sqrt(real * real + imag * imag)
     const phaseDeg = (Math.atan2(imag, real) * 180) / Math.PI
+    const roundedMagnitude = roundIqMetric(magnitude, 3)
+    const roundedPhase = roundIqMetric(phaseDeg, 1)
 
     labels.push(index.toString())
     pairs.push([real, imag])
-    amplitude.push(roundIqMetric(magnitude, 3))
-    phase.push(roundIqMetric(phaseDeg, 1))
+    amplitude.push(roundedMagnitude)
+    phase.push(roundedPhase)
+    phaseCloud.push([roundedPhase, roundedMagnitude])
 
     realEnergy += real * real
     imagEnergy += imag * imag
@@ -1858,11 +2127,16 @@ function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
   const amplitudeStd = Math.sqrt(amplitudeVariance)
   const rmsReal = sampleCount > 0 ? Math.sqrt(realEnergy / sampleCount) : 0
   const rmsImag = sampleCount > 0 ? Math.sqrt(imagEnergy / sampleCount) : 0
-  const zeroCrossRate =
-    sampleCount > 1 ? (zeroCrossCount / ((sampleCount - 1) * 2)) * 100 : 0
+  const zeroCrossRate = sampleCount > 1 ? (zeroCrossCount / ((sampleCount - 1) * 2)) * 100 : 0
   const spectrum = buildIqSpectrumProfile(pairs, 24)
   const spectrumValues = spectrum.map((item) => roundIqMetric(item.value, 1))
+  const histogram = buildIqAmplitudeHistogram(amplitude, 8)
+  const autocorrelation = buildIqAutocorrelation(pairs, 28)
   const dominantSpectrumIndex = spectrumValues.reduce(
+    (bestIndex, value, index, source) => (value > source[bestIndex] ? index : bestIndex),
+    0,
+  )
+  const dominantHistogramIndex = histogram.values.reduce(
     (bestIndex, value, index, source) => (value > source[bestIndex] ? index : bestIndex),
     0,
   )
@@ -1876,6 +2150,7 @@ function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
           spectralEnergyTotal) *
         100
       : 0
+  const autocorrelationPeak = autocorrelation.values.slice(1).reduce((peak, value) => Math.max(peak, value), 0)
 
   return {
     sampleCount,
@@ -1883,8 +2158,13 @@ function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
     pairs,
     amplitude,
     phase,
+    phaseCloud,
     spectrumLabels: spectrum.map((item) => item.label),
     spectrumValues,
+    histogramLabels: histogram.labels,
+    histogramValues: histogram.values,
+    autocorrelationLabels: autocorrelation.labels,
+    autocorrelationValues: autocorrelation.values,
     rmsReal,
     rmsImag,
     meanAmplitude,
@@ -1899,6 +2179,8 @@ function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
     stabilityScore: clampIqMetric(100 - (amplitudeStd / Math.max(meanAmplitude, 1e-6)) * 100, 0, 100),
     spectralFocus,
     dominantSpectrumIndex,
+    dominantHistogramIndex,
+    autocorrelationPeak,
   }
 }
 
@@ -1928,6 +2210,49 @@ function buildIqSpectrumProfile(pairs: Array<[number, number]>, binCount: number
     label: `B${String(index + 1).padStart(2, '0')}`,
     value: (value / peak) * 100,
   }))
+}
+
+function buildIqAmplitudeHistogram(amplitude: number[], bucketCount: number) {
+  const safeBucketCount = Math.max(4, bucketCount)
+  const safePeak = Math.max(...amplitude, 1e-6)
+  const counts = Array.from({ length: safeBucketCount }, () => 0)
+
+  amplitude.forEach((value) => {
+    const ratio = Math.min(0.999999, value / safePeak)
+    const bucketIndex = Math.min(safeBucketCount - 1, Math.floor(ratio * safeBucketCount))
+    counts[bucketIndex] += 1
+  })
+
+  const total = Math.max(amplitude.length, 1)
+  return {
+    labels: counts.map((_, index) => `H${index + 1}`),
+    values: counts.map((count) => roundIqMetric((count / total) * 100, 1)),
+  }
+}
+
+function buildIqAutocorrelation(pairs: Array<[number, number]>, lagCount: number) {
+  const safeLagCount = Math.max(8, Math.min(lagCount, Math.max(1, pairs.length - 1)))
+  const values: number[] = []
+
+  for (let lag = 0; lag <= safeLagCount; lag += 1) {
+    let total = 0
+    let pairsCount = 0
+
+    for (let index = 0; index + lag < pairs.length; index += 1) {
+      const [realA, imagA] = pairs[index]
+      const [realB, imagB] = pairs[index + lag]
+      total += realA * realB + imagA * imagB
+      pairsCount += 1
+    }
+
+    values.push(pairsCount > 0 ? total / pairsCount : 0)
+  }
+
+  const normalization = Math.max(Math.abs(values[0] ?? 1), 1e-6)
+  return {
+    labels: values.map((_, index) => `L${index}`),
+    values: values.map((value) => roundIqMetric(value / normalization, 3)),
+  }
 }
 
 function buildHeatmapOption(matrix: FingerprintMatrix, compact: boolean): EChartsCoreOption {
