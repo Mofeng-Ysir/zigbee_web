@@ -15,7 +15,6 @@ import {
   Brain,
   ChevronRight,
   Clock3,
-  Cpu,
   Fingerprint,
   GitCompare,
   Grid2x2,
@@ -45,6 +44,53 @@ import type {
   OfflineDevice,
 } from './types'
 import { useDashboardData } from './useDashboardData'
+
+type IqChartKey =
+  | 'waveform'
+  | 'constellation'
+  | 'envelope'
+  | 'spectrum'
+  | 'autocorrelation'
+  | 'histogram'
+  | 'phaseCloud'
+  | 'radar'
+
+interface IqChartCard {
+  key: IqChartKey
+  label: string
+  title: string
+  description: string
+  highlights: string[]
+  option: EChartsCoreOption
+  previewOption: EChartsCoreOption
+}
+
+interface IqAnalysis {
+  sampleCount: number
+  labels: string[]
+  pairs: Array<[number, number]>
+  amplitude: number[]
+  phase: number[]
+  phaseCloud: Array<[number, number]>
+  spectrumLabels: string[]
+  spectrumValues: number[]
+  histogramLabels: string[]
+  histogramValues: number[]
+  autocorrelationLabels: string[]
+  autocorrelationValues: number[]
+  rmsReal: number
+  rmsImag: number
+  meanAmplitude: number
+  peakAmplitude: number
+  phaseSpan: number
+  zeroCrossRate: number
+  balanceScore: number
+  stabilityScore: number
+  spectralFocus: number
+  dominantSpectrumIndex: number
+  dominantHistogramIndex: number
+  autocorrelationPeak: number
+}
 
 function App() {
   const [view, setView] = useState<NavigationView>('realtime')
@@ -416,8 +462,11 @@ function RealtimeView({
   const hasDevices = devices.length > 0
   const hasJoiningDevice = hasJoiningIdentity(data.joiningDevice)
   const hasIqData = hasIqSamples(data.joiningDevice)
+  const [activeIqChart, setActiveIqChart] = useState<IqChartKey>('waveform')
   const hasPrediction = hasJoiningPrediction(data.joiningDevice)
   const latestJoinTime = history[0]?.timestamp
+  const iqCharts = hasIqData ? buildIqChartCards(data.joiningDevice) : []
+  const activeIqCard = iqCharts.find((chart) => chart.key === activeIqChart) ?? iqCharts[0] ?? null
 
   return (
     <>
@@ -435,15 +484,7 @@ function RealtimeView({
         </div>
       </header>
 
-      <section className="stat-row">
-        <StatCard
-          label="协调器 MAC"
-          value={data.coordinator.ieeeAddr}
-          detail="Coordinator IEEE"
-          tone="cyan"
-          icon={<Cpu size={14} strokeWidth={1.8} />}
-          compact
-        />
+      <section className="stat-row stat-row-compact">
         <StatCard
           label="PAN ID"
           value={data.coordinator.panId}
@@ -468,7 +509,7 @@ function RealtimeView({
         />
       </section>
 
-      <section className="row row-mid">
+      <section className="row row-device">
         <CardPanel
           className="device-panel"
           title={
@@ -505,29 +546,74 @@ function RealtimeView({
             <EmptyState message="暂无网络设备数据" />
           )}
         </CardPanel>
+      </section>
 
+      <section className="row row-iq">
         <CardPanel
           className="iq-panel reverse-radius"
           title={<PanelTitle icon={<Activity size={16} strokeWidth={1.8} />} title="网络 IQ 数据" />}
         >
-          <div className="iq-tabs">
-            <button type="button" className="iq-tab active">
-              实时特征
-            </button>
-            <button type="button" className="iq-tab">
-              参考波形
-            </button>
-            <button type="button" className="iq-tab">
-              频谱图
-            </button>
-          </div>
-          <div className="chart-slot">
-            {hasIqData ? (
-              <EChartView option={buildIqChartOption(data.joiningDevice)} />
-            ) : (
+          {hasIqData && activeIqCard ? (
+            <div className="iq-shell">
+              <div className="iq-tabs" role="tablist" aria-label="IQ 图表类型">
+                {iqCharts.map((chart) => (
+                  <button
+                    key={chart.key}
+                    type="button"
+                    className={chart.key === activeIqCard.key ? 'iq-tab active' : 'iq-tab'}
+                    onClick={() => setActiveIqChart(chart.key)}
+                  >
+                    {chart.label}
+                  </button>
+                ))}
+              </div>
+              <div className="iq-dashboard">
+                <article className="iq-stage">
+                  <div className="iq-stage-head">
+                    <div className="iq-stage-copy">
+                      <strong>{activeIqCard.title}</strong>
+                      <span>{activeIqCard.description}</span>
+                    </div>
+                    <div className="iq-stage-badges">
+                      {activeIqCard.highlights.map((highlight) => (
+                        <span key={highlight} className="iq-stage-badge">
+                          {highlight}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="chart-slot iq-stage-chart">
+                    <EChartView option={activeIqCard.option} />
+                  </div>
+                </article>
+
+                <div className="iq-preview-grid">
+                  {iqCharts
+                    .filter((chart) => chart.key !== activeIqCard.key)
+                    .map((chart) => (
+                      <button
+                        key={chart.key}
+                        type="button"
+                        className="iq-preview-card"
+                        onClick={() => setActiveIqChart(chart.key)}
+                      >
+                        <div className="iq-preview-head">
+                          <strong>{chart.label}</strong>
+                          <span>{chart.title}</span>
+                        </div>
+                        <div className="iq-preview-chart">
+                          <EChartView option={chart.previewOption} />
+                        </div>
+                      </button>
+                    ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="chart-slot">
               <EmptyState message="暂无 IQ 数据" />
-            )}
-          </div>
+            </div>
+          )}
         </CardPanel>
       </section>
 
@@ -1214,35 +1300,153 @@ function isPresentText(value: string) {
   return value.trim().length > 0 && value !== '--'
 }
 
-function buildIqChartOption(device: JoiningDevice): EChartsCoreOption {
+function buildIqChartCards(device: JoiningDevice): IqChartCard[] {
+  const analysis = analyzeIqSamples(device)
+  const confidenceLabel = `${Math.round(device.confidence * 1000) / 10}%`
+  const dominantSpectrumLabel = analysis.spectrumLabels[analysis.dominantSpectrumIndex] ?? 'B01'
+  const dominantHistogramLabel = analysis.histogramLabels[analysis.dominantHistogramIndex] ?? 'H1'
+
+  return [
+    {
+      key: 'waveform',
+      label: 'I/Q 波形',
+      title: '实时 I/Q 波形',
+      description: '同步观察实部与虚部样本走势，适合定位抖动和幅度偏移。',
+      highlights: [
+        `样本 ${analysis.sampleCount} 点`,
+        `RMS ${formatIqNumber(analysis.rmsReal)}/${formatIqNumber(analysis.rmsImag)}`,
+        `信号 ${device.signalScore}`,
+      ],
+      option: buildIqWaveformOption(device),
+      previewOption: buildIqWaveformOption(device, true),
+    },
+    {
+      key: 'constellation',
+      label: '星座图',
+      title: 'I/Q 星座分布',
+      description: '把每个采样点映射到 I-Q 平面，快速判断聚类、旋转和失真。',
+      highlights: [
+        `平衡度 ${Math.round(analysis.balanceScore)}%`,
+        `均幅 ${formatIqNumber(analysis.meanAmplitude)}`,
+        `峰值 ${formatIqNumber(analysis.peakAmplitude)}`,
+      ],
+      option: buildIqConstellationOption(analysis),
+      previewOption: buildIqConstellationOption(analysis, true),
+    },
+    {
+      key: 'envelope',
+      label: '幅相轨迹',
+      title: '包络与相位轨迹',
+      description: '同时展示幅度包络和瞬时相位，便于看出突发漂移和相位跳变。',
+      highlights: [
+        `跨度 ${Math.round(analysis.phaseSpan)}°`,
+        `稳定度 ${Math.round(analysis.stabilityScore)}%`,
+        `过零率 ${Math.round(analysis.zeroCrossRate)}%`,
+      ],
+      option: buildIqEnvelopeOption(analysis),
+      previewOption: buildIqEnvelopeOption(analysis, true),
+    },
+    {
+      key: 'spectrum',
+      label: '频谱能量',
+      title: '归一化频谱',
+      description: '对 IQ 序列做频域采样，查看主能量带和频谱集中程度。',
+      highlights: [
+        `主瓣 ${dominantSpectrumLabel}`,
+        `集中度 ${Math.round(analysis.spectralFocus)}%`,
+        `置信 ${confidenceLabel}`,
+      ],
+      option: buildIqSpectrumOption(analysis),
+      previewOption: buildIqSpectrumOption(analysis, true),
+    },
+    {
+      key: 'autocorrelation',
+      label: '自相关',
+      title: '时域自相关曲线',
+      description: '观察 IQ 序列在不同时延下的相关性，适合看周期结构与短时重复。',
+      highlights: [
+        `次峰 ${formatIqNumber(analysis.autocorrelationPeak, 2)}`,
+        `主瓣 ${dominantSpectrumLabel}`,
+        `稳定度 ${Math.round(analysis.stabilityScore)}%`,
+      ],
+      option: buildIqAutocorrelationOption(analysis),
+      previewOption: buildIqAutocorrelationOption(analysis, true),
+    },
+    {
+      key: 'histogram',
+      label: '幅度直方图',
+      title: '包络幅度分布',
+      description: '查看实时样本的能量集中区间，便于对比设备发射包络的离散程度。',
+      highlights: [
+        `密集区 ${dominantHistogramLabel}`,
+        `均幅 ${formatIqNumber(analysis.meanAmplitude)}`,
+        `峰值 ${formatIqNumber(analysis.peakAmplitude)}`,
+      ],
+      option: buildIqHistogramOption(analysis),
+      previewOption: buildIqHistogramOption(analysis, true),
+    },
+    {
+      key: 'phaseCloud',
+      label: '相位云图',
+      title: '相位-幅度云图',
+      description: '将瞬时相位与包络幅度投影到散点平面，辅助识别旋转与幅度耦合关系。',
+      highlights: [
+        `相位跨度 ${Math.round(analysis.phaseSpan)}°`,
+        `平衡 ${Math.round(analysis.balanceScore)}%`,
+        `信号 ${device.signalScore}`,
+      ],
+      option: buildIqPhaseCloudOption(analysis),
+      previewOption: buildIqPhaseCloudOption(analysis, true),
+    },
+    {
+      key: 'radar',
+      label: '特征雷达',
+      title: '物理层特征雷达',
+      description: '把当前设备的稳定性、平衡度和能量分布压缩成一张摘要图。',
+      highlights: [
+        `置信 ${confidenceLabel}`,
+        `平衡 ${Math.round(analysis.balanceScore)}%`,
+        `能量 ${Math.round(analysis.spectralFocus)}%`,
+      ],
+      option: buildIqRadarOption(device, analysis),
+      previewOption: buildIqRadarOption(device, analysis, true),
+    },
+  ]
+}
+
+function buildIqWaveformOption(device: JoiningDevice, compact = false): EChartsCoreOption {
   return {
-    animationDuration: 500,
+    animationDuration: compact ? 240 : 500,
     animationEasing: 'cubicOut',
     grid: {
-      left: 14,
-      right: 14,
-      top: 28,
-      bottom: 20,
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 28,
+      bottom: compact ? 10 : 20,
       containLabel: true,
     },
-    tooltip: {
-      trigger: 'axis',
-      backgroundColor: 'rgba(11, 18, 32, 0.94)',
-      borderColor: '#243049',
-      textStyle: {
-        color: '#dce6f7',
-      },
-    },
-    legend: {
-      top: 2,
-      right: 8,
-      itemWidth: 10,
-      itemHeight: 10,
-      textStyle: {
-        color: '#7d90af',
-        fontSize: 11,
-      },
-    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    legend: compact
+      ? undefined
+      : {
+          top: 2,
+          right: 8,
+          itemWidth: 10,
+          itemHeight: 10,
+          textStyle: {
+            color: '#7d90af',
+            fontSize: 11,
+          },
+        },
     xAxis: {
       type: 'category',
       boundaryGap: false,
@@ -1253,6 +1457,7 @@ function buildIqChartOption(device: JoiningDevice): EChartsCoreOption {
         },
       },
       axisLabel: {
+        show: !compact,
         color: '#5f7599',
         fontSize: 10,
       },
@@ -1263,6 +1468,350 @@ function buildIqChartOption(device: JoiningDevice): EChartsCoreOption {
     yAxis: {
       type: 'value',
       axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+      axisLine: {
+        show: compact,
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.65)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'line',
+        name: '实部',
+        smooth: !compact,
+        showSymbol: false,
+        lineStyle: {
+          width: compact ? 1.5 : 2,
+          color: '#2dd4bf',
+        },
+        areaStyle: compact ? undefined : { color: 'rgba(45, 212, 191, 0.12)' },
+        data: device.iqSamples.real,
+      },
+      {
+        type: 'line',
+        name: '虚部',
+        smooth: !compact,
+        showSymbol: false,
+        lineStyle: {
+          width: compact ? 1.5 : 2,
+          color: '#38bdf8',
+        },
+        areaStyle: compact ? undefined : { color: 'rgba(56, 189, 248, 0.1)' },
+        data: device.iqSamples.imag,
+      },
+    ],
+  }
+}
+
+function buildIqConstellationOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 16,
+      right: compact ? 8 : 16,
+      top: compact ? 10 : 22,
+      bottom: compact ? 10 : 22,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'item',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'value',
+      min: -1.2,
+      max: 1.2,
+      name: compact ? '' : 'I',
+      nameTextStyle: {
+        color: '#7d90af',
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.45)',
+        },
+      },
+    },
+    yAxis: {
+      type: 'value',
+      min: -1.2,
+      max: 1.2,
+      name: compact ? '' : 'Q',
+      nameTextStyle: {
+        color: '#7d90af',
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.45)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'scatter',
+        symbolSize: compact ? 4 : 7,
+        itemStyle: {
+          color: '#22d3ee',
+          opacity: compact ? 0.8 : 0.9,
+          shadowBlur: compact ? 0 : 8,
+          shadowColor: 'rgba(34, 211, 238, 0.28)',
+        },
+        data: analysis.pairs,
+      },
+    ],
+  }
+}
+
+function buildIqEnvelopeOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 240 : 460,
+    grid: {
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 28,
+      bottom: compact ? 10 : 20,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    legend: compact
+      ? undefined
+      : {
+          top: 2,
+          right: 8,
+          itemWidth: 10,
+          itemHeight: 10,
+          textStyle: {
+            color: '#7d90af',
+            fontSize: 11,
+          },
+        },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: analysis.labels,
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        name: compact ? '' : '幅度',
+        axisLabel: {
+          show: !compact,
+          color: '#5f7599',
+          fontSize: 10,
+        },
+        splitLine: {
+          lineStyle: {
+            color: 'rgba(36, 48, 73, 0.65)',
+          },
+        },
+      },
+      {
+        type: 'value',
+        name: compact ? '' : '相位',
+        min: -180,
+        max: 180,
+        axisLabel: {
+          show: !compact,
+          color: '#7c93b5',
+          fontSize: 10,
+          formatter: '{value}°',
+        },
+        splitLine: {
+          show: false,
+        },
+      },
+    ],
+    series: [
+      {
+        type: 'line',
+        name: '包络幅度',
+        smooth: !compact,
+        showSymbol: false,
+        lineStyle: {
+          width: compact ? 1.4 : 2,
+          color: '#f59e0b',
+        },
+        areaStyle: compact ? undefined : { color: 'rgba(245, 158, 11, 0.08)' },
+        data: analysis.amplitude,
+      },
+      {
+        type: 'line',
+        name: '瞬时相位',
+        yAxisIndex: 1,
+        smooth: !compact,
+        showSymbol: false,
+        lineStyle: {
+          width: compact ? 1.2 : 1.8,
+          color: '#c084fc',
+        },
+        data: analysis.phase,
+      },
+    ],
+  }
+}
+
+function buildIqSpectrumOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 24,
+      bottom: compact ? 10 : 20,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          axisPointer: {
+            type: 'shadow',
+          },
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'category',
+      data: analysis.spectrumLabels,
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+        interval: compact ? 3 : 1,
+      },
+    },
+    yAxis: {
+      type: 'value',
+      max: 100,
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+        formatter: '{value}%',
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.65)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'bar',
+        barWidth: compact ? '58%' : '68%',
+        itemStyle: {
+          color: '#3b82f6',
+          borderRadius: [4, 4, 0, 0],
+        },
+        data: analysis.spectrumValues,
+      },
+    ],
+  }
+}
+
+function buildIqAutocorrelationOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 24,
+      bottom: compact ? 10 : 20,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: analysis.autocorrelationLabels,
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+    },
+    yAxis: {
+      type: 'value',
+      min: -1,
+      max: 1,
+      axisLabel: {
+        show: !compact,
         color: '#5f7599',
         fontSize: 10,
       },
@@ -1275,33 +1824,434 @@ function buildIqChartOption(device: JoiningDevice): EChartsCoreOption {
     series: [
       {
         type: 'line',
-        name: '实部',
-        smooth: true,
+        smooth: !compact,
         showSymbol: false,
         lineStyle: {
-          width: 2,
-          color: '#2dd4bf',
+          width: compact ? 1.4 : 2,
+          color: '#34d399',
         },
-        areaStyle: {
-          color: 'rgba(45, 212, 191, 0.12)',
-        },
-        data: device.iqSamples.real,
-      },
-      {
-        type: 'line',
-        name: '虚部',
-        smooth: true,
-        showSymbol: false,
-        lineStyle: {
-          width: 2,
-          color: '#38bdf8',
-        },
-        areaStyle: {
-          color: 'rgba(56, 189, 248, 0.1)',
-        },
-        data: device.iqSamples.imag,
+        areaStyle: compact ? undefined : { color: 'rgba(52, 211, 153, 0.12)' },
+        data: analysis.autocorrelationValues,
       },
     ],
+  }
+}
+
+function buildIqHistogramOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 14,
+      right: compact ? 8 : 14,
+      top: compact ? 12 : 24,
+      bottom: compact ? 10 : 20,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'axis',
+          axisPointer: {
+            type: 'shadow',
+          },
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'category',
+      data: analysis.histogramLabels,
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+    },
+    yAxis: {
+      type: 'value',
+      max: 100,
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+        formatter: '{value}%',
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.65)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'bar',
+        barWidth: compact ? '54%' : '64%',
+        itemStyle: {
+          color: '#f59e0b',
+          borderRadius: [4, 4, 0, 0],
+        },
+        data: analysis.histogramValues,
+      },
+    ],
+  }
+}
+
+function buildIqPhaseCloudOption(analysis: IqAnalysis, compact = false): EChartsCoreOption {
+  return {
+    animationDuration: compact ? 220 : 420,
+    grid: {
+      left: compact ? 8 : 16,
+      right: compact ? 8 : 16,
+      top: compact ? 10 : 22,
+      bottom: compact ? 10 : 22,
+      containLabel: true,
+    },
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'item',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    xAxis: {
+      type: 'value',
+      min: -180,
+      max: 180,
+      name: compact ? '' : '相位',
+      nameTextStyle: {
+        color: '#7d90af',
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+        formatter: '{value}°',
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.45)',
+        },
+      },
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      max: Math.max(1.2, Math.ceil(analysis.peakAmplitude * 10) / 10),
+      name: compact ? '' : '幅度',
+      nameTextStyle: {
+        color: '#7d90af',
+      },
+      axisLine: {
+        lineStyle: {
+          color: '#243049',
+        },
+      },
+      axisLabel: {
+        show: !compact,
+        color: '#5f7599',
+        fontSize: 10,
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.45)',
+        },
+      },
+    },
+    series: [
+      {
+        type: 'scatter',
+        symbolSize: compact ? 4 : 6,
+        itemStyle: {
+          color: '#c084fc',
+          opacity: compact ? 0.75 : 0.85,
+          shadowBlur: compact ? 0 : 8,
+          shadowColor: 'rgba(192, 132, 252, 0.22)',
+        },
+        data: analysis.phaseCloud,
+      },
+    ],
+  }
+}
+
+function buildIqRadarOption(
+  device: JoiningDevice,
+  analysis: IqAnalysis,
+  compact = false,
+): EChartsCoreOption {
+  const radarValues = [
+    Math.round(device.confidence * 100),
+    Math.round(analysis.stabilityScore),
+    Math.round(analysis.balanceScore),
+    Math.round(analysis.spectralFocus),
+    Math.round(analysis.zeroCrossRate),
+    Math.round(clampIqMetric((analysis.peakAmplitude / 1.2) * 100, 0, 100)),
+  ]
+
+  return {
+    animationDuration: compact ? 220 : 420,
+    tooltip: compact
+      ? undefined
+      : {
+          trigger: 'item',
+          backgroundColor: 'rgba(11, 18, 32, 0.94)',
+          borderColor: '#243049',
+          textStyle: {
+            color: '#dce6f7',
+          },
+        },
+    radar: {
+      center: ['50%', compact ? '54%' : '56%'],
+      radius: compact ? '56%' : '68%',
+      indicator: [
+        { name: '置信度', max: 100 },
+        { name: '稳定度', max: 100 },
+        { name: '平衡度', max: 100 },
+        { name: '能量集中', max: 100 },
+        { name: '过零率', max: 100 },
+        { name: '峰值幅度', max: 100 },
+      ],
+      axisName: {
+        color: '#7d90af',
+        fontSize: compact ? 9 : 11,
+      },
+      axisLine: {
+        lineStyle: {
+          color: 'rgba(59, 130, 246, 0.22)',
+        },
+      },
+      splitLine: {
+        lineStyle: {
+          color: 'rgba(36, 48, 73, 0.75)',
+        },
+      },
+      splitArea: {
+        areaStyle: {
+          color: ['rgba(19, 28, 46, 0.65)', 'rgba(26, 36, 56, 0.65)'],
+        },
+      },
+    },
+    series: [
+      {
+        type: 'radar',
+        data: [
+          {
+            value: radarValues,
+            name: '当前特征',
+            symbol: compact ? 'none' : 'circle',
+            symbolSize: 5,
+            lineStyle: {
+              color: '#22d3ee',
+              width: 2,
+            },
+            areaStyle: {
+              color: 'rgba(34, 211, 238, 0.18)',
+            },
+            itemStyle: {
+              color: '#22d3ee',
+            },
+          },
+        ],
+      },
+    ],
+  }
+}
+
+function analyzeIqSamples(device: JoiningDevice): IqAnalysis {
+  const sampleCount = Math.min(device.iqSamples.real.length, device.iqSamples.imag.length)
+  const labels: string[] = []
+  const pairs: Array<[number, number]> = []
+  const amplitude: number[] = []
+  const phase: number[] = []
+  const phaseCloud: Array<[number, number]> = []
+  let realEnergy = 0
+  let imagEnergy = 0
+  let amplitudeTotal = 0
+  let peakAmplitude = 0
+  let phaseMin = Number.POSITIVE_INFINITY
+  let phaseMax = Number.NEGATIVE_INFINITY
+  let zeroCrossCount = 0
+
+  for (let index = 0; index < sampleCount; index += 1) {
+    const real = device.iqSamples.real[index] ?? 0
+    const imag = device.iqSamples.imag[index] ?? 0
+    const magnitude = Math.sqrt(real * real + imag * imag)
+    const phaseDeg = (Math.atan2(imag, real) * 180) / Math.PI
+    const roundedMagnitude = roundIqMetric(magnitude, 3)
+    const roundedPhase = roundIqMetric(phaseDeg, 1)
+
+    labels.push(index.toString())
+    pairs.push([real, imag])
+    amplitude.push(roundedMagnitude)
+    phase.push(roundedPhase)
+    phaseCloud.push([roundedPhase, roundedMagnitude])
+
+    realEnergy += real * real
+    imagEnergy += imag * imag
+    amplitudeTotal += magnitude
+    peakAmplitude = Math.max(peakAmplitude, magnitude)
+    phaseMin = Math.min(phaseMin, phaseDeg)
+    phaseMax = Math.max(phaseMax, phaseDeg)
+
+    if (index > 0) {
+      const previousReal = device.iqSamples.real[index - 1] ?? 0
+      const previousImag = device.iqSamples.imag[index - 1] ?? 0
+      if (Math.sign(real) !== Math.sign(previousReal)) {
+        zeroCrossCount += 1
+      }
+      if (Math.sign(imag) !== Math.sign(previousImag)) {
+        zeroCrossCount += 1
+      }
+    }
+  }
+
+  const meanAmplitude = sampleCount > 0 ? amplitudeTotal / sampleCount : 0
+  const amplitudeVariance =
+    sampleCount > 0
+      ? amplitude.reduce((total, value) => total + (value - meanAmplitude) ** 2, 0) / sampleCount
+      : 0
+  const amplitudeStd = Math.sqrt(amplitudeVariance)
+  const rmsReal = sampleCount > 0 ? Math.sqrt(realEnergy / sampleCount) : 0
+  const rmsImag = sampleCount > 0 ? Math.sqrt(imagEnergy / sampleCount) : 0
+  const zeroCrossRate = sampleCount > 1 ? (zeroCrossCount / ((sampleCount - 1) * 2)) * 100 : 0
+  const spectrum = buildIqSpectrumProfile(pairs, 24)
+  const spectrumValues = spectrum.map((item) => roundIqMetric(item.value, 1))
+  const histogram = buildIqAmplitudeHistogram(amplitude, 8)
+  const autocorrelation = buildIqAutocorrelation(pairs, 28)
+  const dominantSpectrumIndex = spectrumValues.reduce(
+    (bestIndex, value, index, source) => (value > source[bestIndex] ? index : bestIndex),
+    0,
+  )
+  const dominantHistogramIndex = histogram.values.reduce(
+    (bestIndex, value, index, source) => (value > source[bestIndex] ? index : bestIndex),
+    0,
+  )
+  const spectralEnergyTotal = spectrumValues.reduce((total, value) => total + value, 0)
+  const spectralFocus =
+    spectralEnergyTotal > 0
+      ? ([...spectrumValues]
+          .sort((left, right) => right - left)
+          .slice(0, 3)
+          .reduce((total, value) => total + value, 0) /
+          spectralEnergyTotal) *
+        100
+      : 0
+  const autocorrelationPeak = autocorrelation.values.slice(1).reduce((peak, value) => Math.max(peak, value), 0)
+
+  return {
+    sampleCount,
+    labels,
+    pairs,
+    amplitude,
+    phase,
+    phaseCloud,
+    spectrumLabels: spectrum.map((item) => item.label),
+    spectrumValues,
+    histogramLabels: histogram.labels,
+    histogramValues: histogram.values,
+    autocorrelationLabels: autocorrelation.labels,
+    autocorrelationValues: autocorrelation.values,
+    rmsReal,
+    rmsImag,
+    meanAmplitude,
+    peakAmplitude,
+    phaseSpan: sampleCount > 0 ? phaseMax - phaseMin : 0,
+    zeroCrossRate,
+    balanceScore: clampIqMetric(
+      100 - (Math.abs(rmsReal - rmsImag) / Math.max(rmsReal, rmsImag, 1e-6)) * 100,
+      0,
+      100,
+    ),
+    stabilityScore: clampIqMetric(100 - (amplitudeStd / Math.max(meanAmplitude, 1e-6)) * 100, 0, 100),
+    spectralFocus,
+    dominantSpectrumIndex,
+    dominantHistogramIndex,
+    autocorrelationPeak,
+  }
+}
+
+function buildIqSpectrumProfile(pairs: Array<[number, number]>, binCount: number) {
+  const safeBins = Math.max(1, Math.min(binCount, Math.floor(pairs.length / 2) || 1))
+  const magnitudes: number[] = []
+
+  for (let bin = 1; bin <= safeBins; bin += 1) {
+    let realSum = 0
+    let imagSum = 0
+
+    for (let index = 0; index < pairs.length; index += 1) {
+      const [real, imag] = pairs[index]
+      const angle = (2 * Math.PI * bin * index) / Math.max(pairs.length, 1)
+      const cosine = Math.cos(angle)
+      const sine = Math.sin(angle)
+
+      realSum += real * cosine + imag * sine
+      imagSum += imag * cosine - real * sine
+    }
+
+    magnitudes.push(Math.sqrt(realSum * realSum + imagSum * imagSum))
+  }
+
+  const peak = Math.max(...magnitudes, 1e-6)
+  return magnitudes.map((value, index) => ({
+    label: `B${String(index + 1).padStart(2, '0')}`,
+    value: (value / peak) * 100,
+  }))
+}
+
+function buildIqAmplitudeHistogram(amplitude: number[], bucketCount: number) {
+  const safeBucketCount = Math.max(4, bucketCount)
+  const safePeak = Math.max(...amplitude, 1e-6)
+  const counts = Array.from({ length: safeBucketCount }, () => 0)
+
+  amplitude.forEach((value) => {
+    const ratio = Math.min(0.999999, value / safePeak)
+    const bucketIndex = Math.min(safeBucketCount - 1, Math.floor(ratio * safeBucketCount))
+    counts[bucketIndex] += 1
+  })
+
+  const total = Math.max(amplitude.length, 1)
+  return {
+    labels: counts.map((_, index) => `H${index + 1}`),
+    values: counts.map((count) => roundIqMetric((count / total) * 100, 1)),
+  }
+}
+
+function buildIqAutocorrelation(pairs: Array<[number, number]>, lagCount: number) {
+  const safeLagCount = Math.max(8, Math.min(lagCount, Math.max(1, pairs.length - 1)))
+  const values: number[] = []
+
+  for (let lag = 0; lag <= safeLagCount; lag += 1) {
+    let total = 0
+    let pairsCount = 0
+
+    for (let index = 0; index + lag < pairs.length; index += 1) {
+      const [realA, imagA] = pairs[index]
+      const [realB, imagB] = pairs[index + lag]
+      total += realA * realB + imagA * imagB
+      pairsCount += 1
+    }
+
+    values.push(pairsCount > 0 ? total / pairsCount : 0)
+  }
+
+  const normalization = Math.max(Math.abs(values[0] ?? 1), 1e-6)
+  return {
+    labels: values.map((_, index) => `L${index}`),
+    values: values.map((value) => roundIqMetric(value / normalization, 3)),
   }
 }
 
@@ -1424,6 +2374,19 @@ function formatChannelValue(channel: number) {
 
 function countDistinctSelections(leftLabel: string, rightLabel: string) {
   return new Set([leftLabel, rightLabel].filter((value) => value.trim().length > 0)).size
+}
+
+function formatIqNumber(value: number, precision = 2) {
+  return Number.isFinite(value) ? value.toFixed(precision) : '--'
+}
+
+function roundIqMetric(value: number, precision: number) {
+  const factor = 10 ** precision
+  return Math.round(value * factor) / factor
+}
+
+function clampIqMetric(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
 }
 
 function calculateFingerprintSimilarity(left: FingerprintMatrix[], right: FingerprintMatrix[]) {
